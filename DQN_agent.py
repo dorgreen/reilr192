@@ -1,6 +1,8 @@
 import gym
 from gym import wrappers, logger
 import tensorflow as tf
+import numpy as np
+from skimage.color import rgb2gray
 
 # does not inherit from object to make it lighter. could inherit later if needed
 class DQNAgent:
@@ -47,16 +49,40 @@ class DQNAgent:
     def save_weights_to_file(self, filename):
         return
 
+WIDTH = 210
+HEIGHT = 160
+frames_buffer = list(4)
+frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
+frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
+frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
+frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
+
+"""turns a single frame from original format to the format in Q function"""
+def resize_frame(ob):
+    # TODO: if changing network input, change here
+    return rgb2gray(ob)
+
+
 """turns observation ob from env to state as used by agent"""
 def obs_to_state(ob):
     # TODO: if changing network input, change here
-    return ob;
+    this_frame = resize_frame(ob)
+    frames_buffer.pop(0) # oldest frame discarded
+    frames_buffer.append(this_frame)
+
+    # return ob;
+    return tuple(frames_buffer)
 
 if __name__ == '__main__':
 
     # TODO: set args to know if we should train or load from disk and just play according to model
     # TODO: set training via GPU?
     # TODO: add TensorBoard for logging and reporting. can I do it without using TF scoping?
+
+
+
+
+
 
     # You can set the level to logger.DEBUG or logger.WARN if you
     # want to change the amount of output.
@@ -78,14 +104,20 @@ if __name__ == '__main__':
 
     for i in range(episode_count):
         ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
-        ob = obs_to_state(env.reset())
-        state = obs_to_state()
+        ob = env.reset()
+        state = obs_to_state(ob)
+        prev_state = state
+        action = 0
 
         ## for each episode we play according to agent for (at most) episode_length frames
         ## after X frames, update agent's model using the new data we gathered.
         for t in range(episode_length):
-            action = agent.get_action(ob, reward, done)
+            action = agent.get_action(state)
             ob, reward, done, _ = env.step(action)
+            prev_state = state
+            state = obs_to_state(ob)
+            agent.remember(prev_state, action, reward, state, done)
+
             # env.render()
             if done:
                 break
