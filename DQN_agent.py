@@ -3,6 +3,11 @@ from gym import wrappers, logger
 import tensorflow as tf
 import numpy as np
 from skimage.color import rgb2gray
+import random
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.optimizers import Adam
+
 
 # does not inherit from object to make it lighter. could inherit later if needed
 class DQNAgent:
@@ -13,7 +18,7 @@ class DQNAgent:
         self.epsilon_decay = 0.98
         self.batch_size = 150
         self.learning_rate = 0.02
-        self.memory = [] # maybe a capped queue?
+        self.memory = list() # maybe a capped queue?
         self.model = self.create_model()
 
 
@@ -21,24 +26,38 @@ class DQNAgent:
     # if using GPUs probably should be set here
     #      TODO: IMPLEMENT
     def create_model(self):
-        return
+        model = Sequential()
+        model.add(Dense(24, input_dim=WIDTH*HEIGHT*4, activation='relu'))
+        model.add(Dense(24, activation='relu'))
+        model.add(Dense(self.action_space.n, activation='linear'))
+        model.compile(loss='mse',
+                      optimizer=Adam(lr=self.learning_rate))
+        return model
 
-    def get_action(self, observation, reward, done):
+    def get_action(self, state, reward, done):
         """epsilon-greedy"""
-        if tf.random() > self.epsilon:
-            action_vector = self.predict(obs_to_state(observation))
+        if random.random() > self.epsilon:
+            action_vector = self.predict(state)
             return tf.arg_max(action_vector)
 
-        else: return self.action_space.sample()
+        else:
+            return random.randrange(start=0, stop=self.action_space.n)
 
     # add this transition to memory
-    #      TODO: IMPLEMENT
+    #      TODO: Add feature that saves image of state once in a while for debug
     def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action,reward,next_state,done))
         return
 
     # train model with the new data in memory
     #      TODO: IMPLEMENT
     def replay(self, batch_size):
+        # update epsilon
+        if self.epsilon_min > self.epsilon:
+            self.epsilon = self.epsilon * self.epsilon_decay
+
+
+
         return
 
     #      TODO: IMPLEMENT
@@ -51,16 +70,22 @@ class DQNAgent:
 
 WIDTH = 210
 HEIGHT = 160
-frames_buffer = list(4)
-frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
-frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
-frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
-frames_buffer.append(np.zeros(1, WIDTH, HEIGHT))
 
 """turns a single frame from original format to the format in Q function"""
 def resize_frame(ob):
     # TODO: if changing network input, change here
     return rgb2gray(ob)
+
+temp_env = gym.make('DemonAttack-v0')
+empty_frame = resize_frame(temp_env.reset())
+temp_env.close()
+frames_buffer = list()
+
+def reset_frame_buffer():
+    frames_buffer.clear()
+    for i in range(4):
+        frames_buffer.append(empty_frame)
+    return
 
 
 """turns observation ob from env to state as used by agent"""
@@ -104,6 +129,7 @@ if __name__ == '__main__':
 
     for i in range(episode_count):
         ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
+        reset_frame_buffer()
         ob = env.reset()
         state = obs_to_state(ob)
         prev_state = state
@@ -112,7 +138,7 @@ if __name__ == '__main__':
         ## for each episode we play according to agent for (at most) episode_length frames
         ## after X frames, update agent's model using the new data we gathered.
         for t in range(episode_length):
-            action = agent.get_action(state)
+            action = agent.get_action(state, reward, done)
             ob, reward, done, _ = env.step(action)
             prev_state = state
             state = obs_to_state(ob)
@@ -127,7 +153,7 @@ if __name__ == '__main__':
             if(t % 1000 == 0):
                 agent.replay(agent.batch_size)
 
-        # Train after each episode for when we didn't quite make it to 1000 frames...
+        # Train after each episode (for when we didn't quite make it to 1000 frames...)
         agent.replay(agent.batch_size)
 
     # Close the env and write monitor result info to disk
