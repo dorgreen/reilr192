@@ -4,6 +4,7 @@ import tensorflow as tf
 import numpy as np
 from skimage.color import rgb2gray
 import random
+import asyncio.queues
 from keras.models import Sequential
 from keras.layers import Dense
 from keras.optimizers import Adam
@@ -18,7 +19,7 @@ class DQNAgent:
         self.epsilon_decay = 0.98
         self.batch_size = 150
         self.learning_rate = 0.02
-        self.memory = list() # maybe a capped queue?
+        self.memory = list()
         self.model = self.create_model()
 
 
@@ -46,6 +47,8 @@ class DQNAgent:
     # add this transition to memory
     #      TODO: Add feature that saves image of state once in a while for debug
     def remember(self, state, action, reward, next_state, done):
+        if(len(self.memory) >= 2000):
+            self.memory.pop()
         self.memory.append((state, action,reward,next_state,done))
         return
 
@@ -56,17 +59,27 @@ class DQNAgent:
         if self.epsilon_min > self.epsilon:
             self.epsilon = self.epsilon * self.epsilon_decay
 
-
+        batch = random.sample(self.memory, batch_size)
+        # for each transition in this batch, set target and fit to model accordingly
+        for state, action, reward, next_state, done in batch:
+            target = self.model.predict(np.array(state).flatten())
+            if not done:
+                a = self.model.predict(np.array(next_state).flatten())[0]
+                t = self.target_model.predict(next_state)[0]
+                target[0][action] = reward + self.gamma * t[np.argmax(a)]
+            else:
+                target[0][action] = reward
+            self.model.fit(state, target, epochs=1, verbose=0)
 
         return
 
     #      TODO: IMPLEMENT
     def load_weights_from_file(self, filename):
-        return
+        return self.model.set_weights(filename)
 
     #      TODO: IMPLEMENT
     def save_weights_to_file(self, filename):
-        return
+        return self.model.save_weights(filename, True)
 
 WIDTH = 210
 HEIGHT = 160
@@ -105,10 +118,6 @@ if __name__ == '__main__':
     # TODO: add TensorBoard for logging and reporting. can I do it without using TF scoping?
 
 
-
-
-
-
     # You can set the level to logger.DEBUG or logger.WARN if you
     # want to change the amount of output.
     logger.set_level(logger.INFO)
@@ -144,17 +153,17 @@ if __name__ == '__main__':
             state = obs_to_state(ob)
             agent.remember(prev_state, action, reward, state, done)
 
-            # env.render()
+            env.render()
             if done:
                 break
 
             # env.monitor can record video of some episodes. see capped_cubic_video_schedule
 
-            if(t % 1000 == 0):
+            if(t % 1000 == 0 and t>0):
                 agent.replay(agent.batch_size)
 
         # Train after each episode (for when we didn't quite make it to 1000 frames...)
-        agent.replay(agent.batch_size)
+        if agent.memory.__len__() > agent.batch_size: agent.replay(agent.batch_size)
 
     # Close the env and write monitor result info to disk
     env.close()
