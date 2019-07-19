@@ -10,6 +10,12 @@ from keras.layers import Dense
 from keras.optimizers import Adam
 
 
+"""TODOs:
+- set size as property of network
+- change to conv2d
+
+"""
+
 WIDTH = 210
 HEIGHT = 160
 
@@ -19,10 +25,10 @@ class DQNAgent:
         self.action_space = action_space
         self.epsilon = 1.0 # epsilon changes with "temperture", resets on each episode
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.98
-        self.gamma = 0.9 # discount
-        self.batch_size = 150
-        self.learning_rate = 0.02
+        self.epsilon_decay = 0.995
+        self.gamma = 0.85 # discount
+        self.batch_size = 512
+        self.learning_rate = 0.001
         self.memory = list()
         self.model = self.create_model()
 
@@ -81,18 +87,15 @@ class DQNAgent:
             target_f[0][action] = target
             loss = self.model.fit(state, target_f, epochs=1, verbose=0)
 
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-
         return
 
     #      TODO: TEST
     def load_weights_from_file(self, filename):
-        return self.model.set_weights(filename)
+        self.model.load_weights(filename)
 
     #      TODO: TEST
     def save_weights_to_file(self, filename):
-        return self.model.save_weights(filename, True)
+        self.model.save_weights(filename, True)
 
 
 """turns a single frame from original format to the format in Q function"""
@@ -122,6 +125,100 @@ def obs_to_state(ob):
     # flatten from 4 * 33600 to 134400 as needed
     return np.array(tuple(frames_buffer)).flatten().reshape([1, WIDTH*HEIGHT*4])
 
+def transform_reward(reward, done, time):
+    reward = reward if not done else -20
+    reward = -(time / 500) if reward == 0 else reward
+    return reward
+
+def train(agent, episode_count=100, episode_length=5000):
+    global frames_buffer
+    agent.epsilon = 1.0
+
+    for i in range(episode_count):
+        ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
+        reset_frame_buffer()
+        ob = env.reset()
+        state = obs_to_state(ob)
+        prev_state = state
+        action = 0
+        reward = 0
+        done = False
+
+        total_reward = 0
+
+
+        ## for each episode we play according to agent for (at most) episode_length frames
+        ## after X frames, update agent's model using the new data we gathered.
+        for t in range(episode_length):
+            action = agent.get_action(state, reward, done)
+            ob, reward, done, _ = env.step(action)
+            prev_state = state
+            state = obs_to_state(ob)
+            reward = transform_reward(reward,done,t)
+
+            agent.remember(prev_state, action, reward, state, done)
+            total_reward += reward
+
+            trained = False
+
+            env.render()
+            if done:
+                reset_frame_buffer()
+                break
+
+            # env.monitor can record video of some episodes. see capped_cubic_video_schedule
+
+            # DEBUG ONLY
+            if (t % 250 == 0):
+                print("episode: {} step {}".format(i, t))
+
+            if (t % 2000 == 0 and t > 0):
+                agent.replay(agent.batch_size)
+                trained = True
+
+        # Train after each episode (for when we didn't quite make it to 2000 frames...)
+        if (not trained) and agent.memory.__len__() > agent.batch_size:
+            agent.replay(agent.batch_size)
+
+        # Save every 25 runs
+        if i % 25 == 0:
+            agent.save_weights_to_file("./save{}.h5".format(i))
+            agent.save_weights_to_file("./lastest.h5")
+
+        # Close the env (and write monitor result info to disk if it was setup)
+        print("EPISODE: {} TOTAL REWARD {}".format(i, total_reward))
+        env.close()
+
+    agent.save_weights_to_file("./lastest.h5")
+    agent.save_weights_to_file("./final.h5")
+
+def play(agent, games=1, game_length=10000):
+    for game in range(games):
+        # Reset
+        reset_frame_buffer()
+        ob = env.reset()
+        state = obs_to_state(ob)
+        action = 0
+        reward = 0
+        done = 0
+        agent.epsilon = 0 # agent.min_epsilon
+        total_reward = 0
+
+        # play one game
+        for t in range(game_length):
+            action = agent.get_action(state, reward, done)
+            ob, reward, done, _ = env.step(action)
+            state = obs_to_state(ob)
+            reward = transform_reward(reward,done,t)
+            total_reward += reward
+
+            env.render()
+            if done:
+                reset_frame_buffer()
+                print("game: {} total reward: {}".format(game, total_reward))
+                break
+
+
 if __name__ == '__main__':
 
     # TODO: set args to know if we should train or load from disk and just play according to model
@@ -135,7 +232,6 @@ if __name__ == '__main__':
 
     env = gym.make('DemonAttack-v0')
 
-    mode = "train"
 
     ## Setup monitor if needed
     ## possible to use tempfile.mkdtemp().
@@ -143,93 +239,10 @@ if __name__ == '__main__':
     # env = wrappers.Monitor(env, directory=outdir, force=True)
     env.seed(0)
     agent = DQNAgent(env.action_space)
+    train(agent, episode_count=10)
 
-    if mode == "train":
-        episode_count = 100
-        episode_length = 5000
-        reward = 0
-        done = False
-
-        for i in range(episode_count):
-            ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
-            reset_frame_buffer()
-            ob = env.reset()
-            state = obs_to_state(ob)
-            prev_state = state
-            action = 0
-            agent.epsilon = 1
-
-            # DEBUG ONLY
-            print("EPISODE: {}".format(i))
-
-
-            ## for each episode we play according to agent for (at most) episode_length frames
-            ## after X frames, update agent's model using the new data we gathered.
-            for t in range(episode_length):
-                action = agent.get_action(state, reward, done)
-                ob, reward, done, _ = env.step(action)
-                prev_state = state
-                state = obs_to_state(ob)
-                agent.remember(prev_state, action, reward, state, done)
-
-                trained = False
-
-                env.render()
-                if done:
-                    reset_frame_buffer()
-                    break
-
-                # env.monitor can record video of some episodes. see capped_cubic_video_schedule
-
-                # DEBUG ONLY
-                if(t % 250 == 0):
-                    print("episode: {} step {}".format(i,t))
-
-                if(t % 1000 == 0 and t>0):
-                    agent.replay(agent.batch_size)
-                    trained = True
-
-            # Train after each episode (for when we didn't quite make it to 1000 frames...)
-            if (not trained) and agent.memory.__len__() > agent.batch_size:
-                agent.replay(agent.batch_size)
-
-            # Save every 25 runs
-            if i % 25 == 0:
-                agent.save_weights_to_file("./save{}.h5".format(i))
-                agent.save_weights_to_file("./lastest.h5")
-
-            # Close the env (and write monitor result info to disk if it was setup)
-            env.close()
-
-    #todo debug only
-    mode = "play"
-
-    if mode == "play":
-        #agent.load_weights_from_file("./latest.h5")
-
-        # Reset everything...
-        reset_frame_buffer()
-        ob = env.reset()
-        state = obs_to_state(ob)
-        action = 0
-        reward = 0
-        done = 0
-        agent.epsilon = agent.epsilon_min
-        total_reward = 0
-
-        # play one game
-        print("play one game")
-        for t in range(100000):
-            action = agent.get_action(state, reward, done)
-            ob, reward, done, _ = env.step(action)
-            state = obs_to_state(ob)
-            total_reward += reward
-
-            env.render()
-            if done:
-                reset_frame_buffer()
-                print("total reward: {}".format(total_reward))
-                break
-
-
-
+    agent.load_weights_from_file("./final.h5")
+    play(agent, games=10)
+    # else:
+    #     train(agent)
+    #     play(agent, games=1)
