@@ -3,6 +3,7 @@ from gym import wrappers, logger
 import tensorflow as tf
 import numpy as np
 from skimage.color import rgb2gray
+from skimage.transform import resize
 import random
 import asyncio.queues
 from keras.models import Sequential
@@ -13,19 +14,20 @@ from keras.optimizers import Adam
 """TODOs:
 - set size as property of network
 - change to conv2d
-
+- add tracking for lives (and take care of reward as function of it
 """
 
 WIDTH = 210
 HEIGHT = 160
 
+
 # does not inherit from object to make it lighter. could inherit later if needed
 class DQNAgent:
     def __init__(self, action_space):
         self.action_space = action_space
-        self.epsilon = 1.0 # epsilon changes with "temperture", resets on each episode
+        self.epsilon = 0.95 # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.98
         self.gamma = 0.85 # discount
         self.batch_size = 512
         self.learning_rate = 0.001
@@ -67,8 +69,8 @@ class DQNAgent:
     #      TODO: add TensorBoard callback on model.predict for metrics report
     def replay(self, batch_size):
         # update epsilon
-        if self.epsilon_min > self.epsilon:
-            self.epsilon = self.epsilon * self.epsilon_decay
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = (self.epsilon_decay * self.epsilon )
 
         batch = random.sample(self.memory, batch_size)
 
@@ -101,7 +103,7 @@ class DQNAgent:
 """turns a single frame from original format to the format in Q function"""
 def resize_frame(ob):
     # TODO: if changing network input, change here
-    return np.array(rgb2gray(ob)).flatten()
+    return np.array(resize(rgb2gray(ob), (WIDTH, HEIGHT))).flatten()
 
 temp_env = gym.make('DemonAttack-v0')
 empty_frame = resize_frame(temp_env.reset())
@@ -125,14 +127,14 @@ def obs_to_state(ob):
     # flatten from 4 * 33600 to 134400 as needed
     return np.array(tuple(frames_buffer)).flatten().reshape([1, WIDTH*HEIGHT*4])
 
-def transform_reward(reward, done, time):
+def transform_reward(reward, done, lives_delta):
+    reward = -1 if reward == 0 else reward
+    reward = -20 if lives_delta < 0 else reward
     reward = reward if not done else -20
-    reward = -(time / 500) if reward == 0 else reward
     return reward
 
 def train(agent, episode_count=100, episode_length=5000):
     global frames_buffer
-    agent.epsilon = 1.0
 
     for i in range(episode_count):
         ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
@@ -145,16 +147,18 @@ def train(agent, episode_count=100, episode_length=5000):
         done = False
 
         total_reward = 0
+        lives = 0
 
 
         ## for each episode we play according to agent for (at most) episode_length frames
         ## after X frames, update agent's model using the new data we gathered.
         for t in range(episode_length):
             action = agent.get_action(state, reward, done)
-            ob, reward, done, _ = env.step(action)
+            ob, reward, done, info = env.step(action)
             prev_state = state
             state = obs_to_state(ob)
-            reward = transform_reward(reward,done,t)
+            reward = transform_reward(reward,done, info['ale.lives']-lives)
+            lives = info['ale.lives']
 
             agent.remember(prev_state, action, reward, state, done)
             total_reward += reward
@@ -186,7 +190,7 @@ def train(agent, episode_count=100, episode_length=5000):
             agent.save_weights_to_file("./lastest.h5")
 
         # Close the env (and write monitor result info to disk if it was setup)
-        print("EPISODE: {} TOTAL REWARD {}".format(i, total_reward))
+        print("EPISODE: {} TOTAL REWARD {} epsilon {}".format(i, total_reward, agent.epsilon))
         env.close()
 
     agent.save_weights_to_file("./lastest.h5")
@@ -203,13 +207,14 @@ def play(agent, games=1, game_length=10000):
         done = 0
         agent.epsilon = 0 # agent.min_epsilon
         total_reward = 0
+        lives = 0
 
         # play one game
         for t in range(game_length):
             action = agent.get_action(state, reward, done)
-            ob, reward, done, _ = env.step(action)
+            ob, reward, done, info = env.step(action)
             state = obs_to_state(ob)
-            reward = transform_reward(reward,done,t)
+            reward = transform_reward(reward,done,info['ale.lives']-lives)
             total_reward += reward
 
             env.render()
