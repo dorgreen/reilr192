@@ -5,32 +5,36 @@ import numpy as np
 from skimage.color import rgb2gray
 from skimage.transform import resize
 import random
-import asyncio.queues
 from keras.models import Sequential
-from keras.layers import Dense
+from keras.layers import Dense, Input, Flatten, Conv2D
+from keras.models import Model
 from keras.optimizers import Adam
 
 
-"""TODOs:
-- set size as property of network
-- change to conv2d
-- add tracking for lives (and take care of reward as function of it
-"""
+# - record actions taken (graph them?)
+# - TensorBoard:
+#       * TRAINING:
+#         - score, reward, epsilone, steps in, loss (DEFINE!) PER EPISODE
+#       * PLAYING:
+#         - score, acations taken
+#
 
-WIDTH = 210
-HEIGHT = 160
+
+WIDTH = 84
+HEIGHT = 84
 
 
 # does not inherit from object to make it lighter. could inherit later if needed
 class DQNAgent:
     def __init__(self, action_space):
         self.action_space = action_space
+        self.state_size = WIDTH*HEIGHT*4
         self.epsilon = 0.95 # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.98
         self.gamma = 0.85 # discount
-        self.batch_size = 512
-        self.learning_rate = 0.001
+        self.batch_size = 280
+        self.learning_rate = 0.01
         self.memory = list()
         self.model = self.create_model()
 
@@ -39,13 +43,32 @@ class DQNAgent:
     # if using GPUs probably should be set here
     #      TODO: IMPLEMENT
     def create_model(self):
-        model = Sequential()
-        model.add(Dense(24, input_dim=WIDTH*HEIGHT*4, activation='relu'))
-        model.add(Dense(24, activation='relu'))
-        model.add(Dense(self.action_space.n, activation='linear'))
-        model.compile(loss='mse',
-                      optimizer=Adam(lr=self.learning_rate))
-        return model
+
+        with tf.device("/cpu:0"):
+            inputs = Input(shape=(4, WIDTH, HEIGHT,))
+            model = Conv2D(activation='relu', kernel_size=(8,8), filters=16,  strides=(4, 4),
+                                  padding='same')(inputs)
+            model = Conv2D(activation='relu', kernel_size=(4,4) ,filters=32, strides=(2, 2),
+                                  padding='same')(model)
+            model = Flatten()(model)
+            # Last two layers are fully-connected
+            model = Dense(activation='relu', units=256)(model)
+            q_values = Dense(activation='linear', units=6)(model)
+            m = Model(input=inputs, outputs=q_values)
+            m.compile(loss='mse',
+                          optimizer=Adam(lr=self.learning_rate))
+
+        return m
+
+        #
+        # model = Sequential()
+        # model.add(Dense(24, input_dim=self.state_size, activation='relu'))
+        # model.add(Dense(24, activation='relu'))
+        # model.add(Dense(self.action_space.n, activation='linear'))
+        # model.compile(loss='mse',
+        #               optimizer=Adam(lr=self.learning_rate))
+        # return model
+
 
     def get_action(self, state, reward, done):
         """epsilon-greedy"""
@@ -72,7 +95,13 @@ class DQNAgent:
         if self.epsilon > self.epsilon_min:
             self.epsilon = (self.epsilon_decay * self.epsilon )
 
-        batch = random.sample(self.memory, batch_size)
+        #batch = random.sample(self.memory, batch_size)
+        batch = []
+        for i in range(int(batch_size/10)):
+            index = int( random.random() * len(self.memory) )
+            slice = self.memory[index:min(index+10, len(self.memory))]
+            batch.extend(slice)
+        batch.reverse()
 
         # for each transition in this batch, set target and fit to model accordingly
 
@@ -124,18 +153,41 @@ def obs_to_state(ob):
     frames_buffer.pop(0) # oldest frame discarded
     frames_buffer.append(this_frame)
 
-    # flatten from 4 * 33600 to 134400 as needed
-    return np.array(tuple(frames_buffer)).flatten().reshape([1, WIDTH*HEIGHT*4])
+    #
+    return np.array(tuple(frames_buffer)).reshape([1, 4, WIDTH, HEIGHT])
 
-def transform_reward(reward, done, lives_delta):
-    reward = -1 if reward == 0 else reward
-    reward = -20 if lives_delta < 0 else reward
+no_op_count = 0
+
+def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
+    global no_op_count
+    modifier = 0
+    if action == 0:
+        modifier = -1
+    if action == 1:
+        modifier = -0.5
+    if action > 1 and no_op_count > 0:
+        modifier = 1.0 - (no_op_count/30)
+    else:
+        modifier = 1.0
+
+    if modifier < 0:
+        no_op_count = max(- 30, no_op_count+modifier)
+    else:
+        no_op_count = min(no_op_count+modifier,30)
+
+    reward = -1 if reward == 0 else 10*reward
+    reward = -5 if reward == -1 and no_op_count < 0 else reward
+    if episode==-1:
+        reward = -30 if lives_delta < 0 else reward
+    else:
+        reward = max(-30, 0.5*episode) if lives_delta < 0 else reward
     reward = reward if not done else -20
     return reward
 
-def train(agent, episode_count=100, episode_length=5000):
-    global frames_buffer
+def train(agent, episode_count=1000, episode_length=5000):
+    global frames_buffer, no_op_count
 
+    ## Gain some experience..
     for i in range(episode_count):
         ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
         reset_frame_buffer()
@@ -147,6 +199,8 @@ def train(agent, episode_count=100, episode_length=5000):
         done = False
 
         total_reward = 0
+        no_op_count = 0
+        score = 0
         lives = 0
 
 
@@ -157,8 +211,10 @@ def train(agent, episode_count=100, episode_length=5000):
             ob, reward, done, info = env.step(action)
             prev_state = state
             state = obs_to_state(ob)
-            reward = transform_reward(reward,done, info['ale.lives']-lives)
+            score +=reward
+            reward = transform_reward(reward,done, info['ale.lives']-lives,episode=i, action=action)
             lives = info['ale.lives']
+
 
             agent.remember(prev_state, action, reward, state, done)
             total_reward += reward
@@ -174,9 +230,10 @@ def train(agent, episode_count=100, episode_length=5000):
 
             # DEBUG ONLY
             if (t % 250 == 0):
-                print("episode: {} step {}".format(i, t))
+                print("episode: {} step {} no-op {}".format(i, t, no_op_count))
 
-            if (t % 2000 == 0 and t > 0):
+            if (t % 1000 == 0 and t > 0):
+                ## update network
                 agent.replay(agent.batch_size)
                 trained = True
 
@@ -190,13 +247,13 @@ def train(agent, episode_count=100, episode_length=5000):
             agent.save_weights_to_file("./lastest.h5")
 
         # Close the env (and write monitor result info to disk if it was setup)
-        print("EPISODE: {} TOTAL REWARD {} epsilon {}".format(i, total_reward, agent.epsilon))
+        print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i,score, total_reward, agent.epsilon))
         env.close()
 
     agent.save_weights_to_file("./lastest.h5")
     agent.save_weights_to_file("./final.h5")
 
-def play(agent, games=1, game_length=10000):
+def play(agent, games=1, game_length=5000):
     for game in range(games):
         # Reset
         reset_frame_buffer()
@@ -205,7 +262,7 @@ def play(agent, games=1, game_length=10000):
         action = 0
         reward = 0
         done = 0
-        agent.epsilon = 0 # agent.min_epsilon
+        agent.epsilon = agent.epsilon_min
         total_reward = 0
         lives = 0
 
@@ -244,9 +301,10 @@ if __name__ == '__main__':
     # env = wrappers.Monitor(env, directory=outdir, force=True)
     env.seed(0)
     agent = DQNAgent(env.action_space)
-    train(agent, episode_count=10)
+    agent.load_weights_from_file("./save350.h5")
+    train(agent, episode_count=1000)
 
-    agent.load_weights_from_file("./final.h5")
+    agent.load_weights_from_file("./lastest.h5")
     play(agent, games=10)
     # else:
     #     train(agent)
