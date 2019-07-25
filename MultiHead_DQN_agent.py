@@ -9,6 +9,8 @@ from keras.models import Sequential
 from keras.layers import Dense, Input, Flatten, Conv2D
 from keras.models import Model
 from keras.optimizers import Adam
+import keras.backend as kr
+
 
 
 # - record actions taken (graph them?)
@@ -25,7 +27,7 @@ HEIGHT = 84
 
 
 # does not inherit from object to make it lighter. could inherit later if needed
-class DQNAgent:
+class DDQNAgent:
     def __init__(self, action_space, epsilion=0.95):
         self.action_space = action_space
         self.state_size = WIDTH*HEIGHT*4
@@ -36,7 +38,17 @@ class DQNAgent:
         self.learning_rate = 0.01
         self.memory = list()
         self.model = self.create_model()
+        self.target_model = self.create_model()
+        self.update_target_model()
 
+
+    def update_target_model(self):
+        self.target_model.set_weights(self.model.get_weights())
+
+    def huber_loss(target, prediction):
+        @staticmethod
+        error = prediction - target
+        return kr.mean(kr.sqrt(1 + kr.square(error)) - 1, axis=-1)
 
     # creates the network.
     # if using GPUs probably should be set here
@@ -53,7 +65,7 @@ class DQNAgent:
             model = Dense(activation='relu', units=256)(model)
             q_values = Dense(activation='linear', units=6)(model)
             m = Model(input=inputs, outputs=q_values)
-            m.compile(loss='mse',
+            m.compile(loss=self.huber_loss,
                           optimizer=Adam(lr=self.learning_rate))
 
         return m
@@ -77,23 +89,15 @@ class DQNAgent:
 
     # train model with the new data in memory
     #      TODO: add TensorBoard callback on model.predict for metrics report
-    def replay(self, batchsize=-1):
+    def replay(self):
         # update epsilon
         if self.epsilon > self.epsilon_min:
-            self.epsilon = (self.epsilon_decay * self.epsilon )
+            self.epsilon = (self.epsilon_decay * self.epsilon)
 
-        #batch = random.sample(self.memory, batch_size)
+        self.update_target_model()
+
         batch = self.memory
-        for i in range(int(batch_size/10)):
-            index = int( random.random() * len(self.memory) )
-            slice = self.memory[index:min(index+10, len(self.memory))]
-            batch.extend(slice)
-        batch.reverse()
-
         # for each transition in this batch, set target and fit to model accordingly
-
-        #states = list(map(lambda x: x[0], batch))
-        #targets = self.model.predict(states, batch_size, 1)
 
         for state, action, reward, next_state, done in batch:
             target = reward
@@ -101,15 +105,17 @@ class DQNAgent:
             if not done:
                 target = (reward + self.gamma * np.amax(self.model.predict(next_state)))
 
-            target_f = self.model.predict(state)
+            target_f = self.target_model.predict(state)
             target_f[0][action] = target
             loss = self.model.fit(state, target_f, epochs=1, verbose=0)
 
         return
 
+    # TODO: Refactor to save for each agent
     def load_weights_from_file(self, filename):
         self.model.load_weights(filename)
 
+    # TODO: Refactor to save for each agent
     def save_weights_to_file(self, filename):
         self.model.save_weights(filename, True)
 
@@ -128,64 +134,41 @@ def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
 
 
 
-def play(agent, games=1, game_length=5000):
-    for game in range(games):
-        # Reset
-        agent.reset_frame_buffer()
-        ob = env.reset()
-        state = agnet.obs_to_state(ob)
-        action = 0
-        reward = 0
-        done = 0
-        agent.epsilon = agent.epsilon_min
-        total_reward = 0
 
-        # play one game
-        for t in range(game_length):
-            action = agent.get_action(state, reward, done)
-            ob, reward, done, info = env.step(action)
-            state = agent.obs_to_state(ob)
-            total_reward += reward
-
-            env.render()
-            if done:
-                print("game: {} total reward: {}".format(game, total_reward))
-                break
-
-class BootstrappedDQNAgent:
+class MultiHeadDQNAgent:
     # TODO: maybe add bootstrap map as a parameter
-    def __init__(self, action_space, num_of_agents):
+    def __init__(self, action_space, num_of_agents, epsilon=0.95, agents_epsilon=0.95):
         self.action_space = action_space
         self.agents_num = num_of_agents
         self.state_size = WIDTH * HEIGHT * 4
-        self.epsilon = 0.95  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.98
-        self.gamma = 0.85  # discount
-        self.learning_rate = 0.01
-        self.agents = self.create_model(num_of_agents)
+        self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
+        self.agents = self.create_model(num_of_agents, agents_epsilon)
         self._frames_buffer = list()
 
+        # Create the empty frame
         temp_env = gym.make('DemonAttack-v0')
         self._emptyframe = self.resize_frame(temp_env.reset())
         temp_env.close()
 
 
-
-        # creates the network.
+        # creates the agents.
         # if using GPUs probably should be set here
-    def create_model(self, num_of_agents):
+    def create_model(self, num_of_agents, agents_epsilon):
         agents = list(num_of_agents)
         for i in range(num_of_agents):
-            agent.append(DQNAgent(self.action_space))
+            agent.append(DDQNAgent(self.action_space, epsilion=agents_epsilon))
 
          return agents
 
 
     def get_action(self, state, reward, done):
         """epsilon-greedy"""
+        # Get the predictions from all models, sum them up
+        # Choose the best action according to that sum
+        # TODO: maybe choose the action with the highest value?
         if random.random() > self.epsilon:
-            action_vector = self.model.predict(state)
+            for agent in self.agents:
+                action_vector =+ agent.model.predict(state)
             return np.argmax(action_vector)
 
         else:
@@ -199,16 +182,11 @@ class BootstrappedDQNAgent:
         return
 
         # train model with the new data in memory
-        #      TODO: IMPLEMENT
         #      TODO: add TensorBoard callback on model.predict for metrics report
-
-    # TODO: IMPLEMET MEEE
-    def replay(self, batch_size):
-        # update epsilon
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = (self.epsilon_decay * self.epsilon)
-
-       # run agent.train() on each agent
+    # TODO: IMPLEMET WITH MULTITHREADS!
+    def replay(self):
+        for agent in self.agents:
+            agent.replay()
 
         return
 
@@ -220,6 +198,10 @@ class BootstrappedDQNAgent:
     def save_weights_to_file(self, filename):
         self.model.save_weights(filename, True)
 
+    def set_agents_epsilon(self, epsilon):
+        for agent in self.agents:
+            agent.epsilon = epsilon
+        return
 
     @staticmethod
     def resize_frame(ob):
@@ -261,12 +243,12 @@ class BootstrappedDQNAgent:
             lives = 0
 
             # Select a random agent for this episode
-            agent = self.agents[random.randrange(start=0, stop=self.agents_num)]
+            head_agent = self.agents[random.randrange(start=0, stop=self.agents_num)]
 
-            ## for each episode we play according to agent for (at most) episode_length frames
+            ## for each episode we play according to head_agent for (at most) episode_length frames
             ## for each agent in self.agents, record each transition acording to it's probability
             for t in range(episode_length):
-                action = agent.get_action(state, reward, done)
+                action = head_agent.get_action(state, reward, done)
                 ob, reward, done, info = env.step(action)
                 prev_state = state
                 state = self.obs_to_state(ob)
@@ -278,8 +260,6 @@ class BootstrappedDQNAgent:
                 agent.remember(prev_state, action, reward, state, done)
                 total_reward += reward
 
-                trained = False
-
                 env.render()
                 if done:
                     break
@@ -288,28 +268,50 @@ class BootstrappedDQNAgent:
 
                 # DEBUG ONLY
                 if (t % 250 == 0):
-                    print("episode: {} step {} no-op {}".format(i, t, no_op_count))
+                    print("episode: {} step {}".format(i, t))
 
-                if (t % 1000 == 0 and t > 0):
-                    ## update network
-                    agent.replay(agent.batch_size)
-                    trained = True
 
             # Train after each episode (for when we didn't quite make it to 2000 frames...)
-            if (not trained) and agent.memory.__len__() > agent.batch_size:
-                agent.replay(agent.batch_size)
+                agent.replay()
 
             # Save every 25 runs
             if i % 25 == 0:
-                agent.save_weights_to_file("./save{}.h5".format(i))
-                agent.save_weights_to_file("./lastest.h5")
+                agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/save{}.h5".format(i))
+                agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/lastest.h5")
 
             # Close the env (and write monitor result info to disk if it was setup)
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
 
-        agent.save_weights_to_file("./lastest.h5")
-        agent.save_weights_to_file("./final.h5")
+        agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/lastest.h5")
+        agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/final.h5")
+
+
+
+
+def play(agent, games=1, game_length=5000):
+    for game in range(games):
+        # Reset
+        agent.reset_frame_buffer()
+        ob = env.reset()
+        state = agent.obs_to_state(ob)
+        action = 0
+        reward = 0
+        done = 0
+        agent.epsilon = agent.epsilon_min
+        total_reward = 0
+
+        # play one game
+        for t in range(game_length):
+            action = agent.get_action(state, reward, done)
+            ob, reward, done, info = env.step(action)
+            state = agent.obs_to_state(ob)
+            total_reward += reward
+
+            env.render()
+            if done:
+                print("game: {} total reward: {}".format(game, total_reward))
+                break
 
 
 if __name__ == '__main__':
@@ -331,12 +333,13 @@ if __name__ == '__main__':
     # outdir = '/tmp/random-agent-results'
     # env = wrappers.Monitor(env, directory=outdir, force=True)
     env.seed(0)
-    agent = BootstrappedDQNAgent(env.action_space, )
-    agent = DQNAgent(env.action_space)
-    agent.load_weights_from_file("./save350.h5")
-    train(agent, episode_count=1000)
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=2)
+    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/save350.h5")
+    agent.train()
 
-    agent.load_weights_from_file("./lastest.h5")
+    agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/lastest.h5")
+    agent.epsilon = 0.01
+    agent.set_agents_epsilon(0)
     play(agent, games=10)
     # else:
     #     train(agent)
