@@ -31,9 +31,9 @@ save_file_path = "./MultiHead_DQN_Agent_saves/"
 def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
     reward = -1 if reward == 0 else 10 * reward
     if episode == -1:
-        reward = -30 if lives_delta < 0 else reward
+        reward = -10 if lives_delta < 0 else reward
     else:
-        reward = max(-30, 0.5 * episode) if lives_delta < 0 else reward
+        reward = max(-10, -0.5 * episode) if lives_delta < 0 else reward
     reward = reward if not done else -20
     return reward
 
@@ -108,9 +108,9 @@ class MultiHeadDQNAgent:
         self.state_size = WIDTH * HEIGHT * 4
         self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.98
-        self.gamma = 0.85  # discount
-        self.learning_rate = 0.01
+        self.epsilon_decay = 0.991
+        self.gamma = 0.98  # discount
+        self.learning_rate = 0.0025
         self.networks = self.create_model(num_of_agents)
         self.target_networks = self.create_model(num_of_agents)
 
@@ -130,13 +130,13 @@ class MultiHeadDQNAgent:
     def create_single_network(self):
         with tf.device("/cpu:0"):
             inputs = Input(shape=(4, WIDTH, HEIGHT,))
-            model = Conv2D(activation='relu', kernel_size=(8, 8), filters=16, strides=(4, 4),
+            model = Conv2D(activation='relu', kernel_size=(4, 8), filters=32, strides=(4, 4),
                            padding='same')(inputs)
-            model = Conv2D(activation='relu', kernel_size=(4, 4), filters=32, strides=(2, 2),
+            model = Conv2D(activation='relu', kernel_size=(3,3), filters=64, strides=(1, 1),
                            padding='same')(model)
             model = Flatten()(model)
             # Last two layers are fully-connected
-            model = Dense(activation='relu', units=256)(model)
+            model = Dense(activation='relu', units=512)(model)
             q_values = Dense(activation='linear', units=6)(model)
             m = Model(input=inputs, outputs=q_values)
         m.compile(loss=self.huber_loss,
@@ -169,7 +169,7 @@ class MultiHeadDQNAgent:
         #      TODO: Add feature that saves image of state once in a while for debug
 
     def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) >= 2500:
+        if len(self.memory) >= 10000:
             self.memory.pop()
         self.memory.append((state, action, reward, next_state, done))
         return
@@ -188,7 +188,7 @@ class MultiHeadDQNAgent:
         networks = zip(self.networks, self.target_networks)
         for net, target_net in networks:
             batch = random.choices(self.memory, k=size)
-            net = replay_network(net, target_net, batch)
+            net = replay_network(net, target_net, batch,gamma=self.gamma)
 
         return
 
@@ -313,9 +313,9 @@ if __name__ == '__main__':
 
     env = gym.make('DemonAttack-v0')
     env.seed(0)
-    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=10)
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=5)
     # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/save350.h5")
-    agent.train(episode_count=300)
+    agent.train(episode_count=1500)
 
     # agent.load_weights_from_file(save_file_path+"latest/")
     agent.epsilon = 0.01
