@@ -10,8 +10,9 @@ from keras.layers import Dense, Input, Flatten, Conv2D
 from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as kr
-from typing import List
-import queue
+import multiprocessing
+
+
 
 # - record actions taken (graph them?)
 # - TensorBoard:
@@ -26,32 +27,105 @@ WIDTH = 84
 HEIGHT = 84
 
 
-# does not inherit from object to make it lighter. could inherit later if needed
-class DDQNAgent:
-    def __init__(self, action_space, epsilion=0.95):
+def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
+    reward = -1 if reward == 0 else 10 * reward
+    if episode == -1:
+        reward = -30 if lives_delta < 0 else reward
+    else:
+        reward = max(-30, 0.5 * episode) if lives_delta < 0 else reward
+    reward = reward if not done else -50
+    return reward
+
+
+"""turns a single frame from original format to the format in Q function"""
+
+
+def resize_frame(ob):
+    # TODO: if changing network input, change here
+    return np.array(resize(rgb2gray(ob), (WIDTH, HEIGHT))).flatten()
+
+
+temp_env = gym.make('DemonAttack-v0')
+empty_frame = resize_frame(temp_env.reset())
+temp_env.close()
+frames_buffer = list()
+
+
+def reset_frame_buffer():
+    frames_buffer.clear()
+    for i in range(4):
+        frames_buffer.append(empty_frame)
+    return
+
+
+"""turns observation ob from env to state as used by agent"""
+
+
+def obs_to_state(ob):
+    # TODO: if changing network input, change here
+    this_frame = resize_frame(ob)
+    frames_buffer.pop(0)  # oldest frame discarded
+    frames_buffer.append(this_frame)
+
+    #
+    return np.array(tuple(frames_buffer)).reshape([1, 4, WIDTH, HEIGHT])
+
+
+def get_action_from_network(network, state, epsilon):
+    """epsilon-greedy"""
+    if random.random() > epsilon:
+        action_vector = network.predict(state)
+        return np.argmax(action_vector)
+
+    else:
+        return random.randrange(start=0, stop=6)
+
+
+def replay_network(network, target_network, batch, gamma=0.85):
+    target_network.set_weights(network.get_weights())
+    # for each transition in this batch, set target and fit to model accordingly
+
+    for state, action, reward, next_state, done in batch:
+        target = reward
+
+        if not done:
+            target = (reward + gamma * np.amax(network.predict(next_state)))
+
+        target_f = target_network.predict(state)
+        target_f[0][action] = target
+        loss = network.fit(state, target_f, epochs=1, verbose=0)
+
+    return network
+
+
+class MultiHeadDQNAgent:
+    # TODO: maybe add bootstrap map as a parameter
+    def __init__(self, action_space, num_of_agents, epsilon=0.95, agents_epsilon=0.95):
         self.action_space = action_space
+        self.agents_num = num_of_agents
         self.state_size = WIDTH * HEIGHT * 4
-        self.epsilon = epsilion  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
+        self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.98
         self.gamma = 0.85  # discount
         self.learning_rate = 0.01
-        self.model = self.create_model()
-        self.target_model = self.create_model()
-        self.update_target_model()
+        self.networks = self.create_model(num_of_agents)
+        self.target_networks = self.create_model(num_of_agents)
 
+        networks = zip(self.networks, self.target_networks)
+        for net, target_net in networks:
+            target_net.set_weights(net.get_weights())
 
-    def update_target_model(self):
-        self.target_model.set_weights(self.model.get_weights())
+        self.memory = list()
+
+        # creates the agents.
+        # if using GPUs probably should be set here
 
     def huber_loss(self, target, prediction):
         error = prediction - target
         return kr.mean(kr.sqrt(1 + kr.square(error)) - 1, axis=-1)
 
-    # creates the network.
-    # if using GPUs probably should be set here
-    def create_model(self):
-
+    def create_single_network(self):
         with tf.device("/cpu:0"):
             inputs = Input(shape=(4, WIDTH, HEIGHT,))
             model = Conv2D(activation='relu', kernel_size=(8, 8), filters=16, strides=(4, 4),
@@ -63,98 +137,26 @@ class DDQNAgent:
             model = Dense(activation='relu', units=256)(model)
             q_values = Dense(activation='linear', units=6)(model)
             m = Model(input=inputs, outputs=q_values)
-            m.compile(loss=self.huber_loss,
-                      optimizer=Adam(lr=self.learning_rate))
-
+        m.compile(loss=self.huber_loss,
+                  optimizer=Adam(lr=self.learning_rate))
         return m
 
-    def get_action(self, state, reward, done):
-        """epsilon-greedy"""
-        if random.random() > self.epsilon:
-            action_vector = self.model.predict(state)
-            return np.argmax(action_vector)
-
-        else:
-            return random.randrange(start=0, stop=self.action_space.n)
-
-
-    # train model with the new data in memory
-    #      TODO: add TensorBoard callback on model.predict for metrics report
-    def replay(self, batch):
-        # update epsilon
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = (self.epsilon_decay * self.epsilon)
-
-        self.update_target_model()
-
-        # for each transition in this batch, set target and fit to model accordingly
-
-        for state, action, reward, next_state, done in batch:
-            target = reward
-
-            if not done:
-                target = (reward + self.gamma * np.amax(self.model.predict(next_state)))
-
-            target_f = self.target_model.predict(state)
-            target_f[0][action] = target
-            loss = self.model.fit(state, target_f, epochs=1, verbose=0)
-
-        return
-
-    # TODO: Refactor to save for each agent
-    def load_weights_from_file(self, filename):
-        self.model.load_weights(filename)
-
-    # TODO: Refactor to save for each agent
-    def save_weights_to_file(self, filename):
-        self.model.save_weights(filename, True)
-
-
-def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
-    reward = -1 if reward == 0 else 10 * reward
-    if episode == -1:
-        reward = -30 if lives_delta < 0 else reward
-    else:
-        reward = max(-30, 0.5 * episode) if lives_delta < 0 else reward
-    reward = reward if not done else -20
-    return reward
-
-
-class MultiHeadDQNAgent:
-    # TODO: maybe add bootstrap map as a parameter
-    def __init__(self, action_space, num_of_agents, epsilon=0.95, agents_epsilon=0.95):
-        self.action_space = action_space
-        self.agents_num = num_of_agents
-        self.state_size = WIDTH * HEIGHT * 4
-        self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
-        self.agents = self.create_model(num_of_agents, agents_epsilon)
-        self._frames_buffer = list()
-        self.memory = list()
-
-
-        # Create the empty frame
-        temp_env = gym.make('DemonAttack-v0')
-        self._emptyframe = self.resize_frame(temp_env.reset())
-        temp_env.close()
-
-        # creates the agents.
-        # if using GPUs probably should be set here
-
-    def create_model(self, num_of_agents, agents_epsilon) -> List[DDQNAgent]:
-        agents = list()
+    # Networks is a list of networks
+    def create_model(self, num_of_agents):
+        networks = list()
         for i in range(num_of_agents):
-            agents.append(DDQNAgent(self.action_space, epsilion=agents_epsilon))
+            networks.append(self.create_single_network())
+        return networks
 
-        return agents
-
+    # TODO: FIX ME!
     def get_action(self, state, reward, done):
         """epsilon-greedy"""
         # Let all models vote
         # Other options: action with best sum of values, the action with the highest value on some network
         if random.random() > self.epsilon:
             actions = bytearray(6)
-            for agent in self.agents:
-                ++actions[agent.get_action(state,reward,done)]
+            for net in self.networks:
+                ++actions[get_action_from_network(net, state, epsilon=0.01)]
             return np.argmax(actions)
 
         else:
@@ -166,25 +168,24 @@ class MultiHeadDQNAgent:
     def remember(self, state, action, reward, next_state, done):
         if len(self.memory) >= 2500:
             self.memory.pop()
-        self.memory.append((state, action,reward,next_state,done))
+        self.memory.append((state, action, reward, next_state, done))
         return
 
         # train model with the new data in memory
         #      TODO: add TensorBoard callback on model.predict for metrics report
+        # TODO: IMPLEMET WITH MULTITHREADS!
 
-    # TODO: IMPLEMET WITH MULTITHREADS!
     def replay(self):
-        # mask = np.random.binomial(self.agents_num, p=0.5, size=self.agents_num)
-        #
-        # for val, ddqn_agent in zip(mask, self.agents):
-        #     if val > 0:
-        #         self.memory[ddqn_agent].append([state, action, reward, next_state, done])
+
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = (self.epsilon_decay * self.epsilon)
 
         # Get a batch for each ddqn agent:
         size = min(len(self.memory), 256)
-        for dqn_agent in self.agents:
-            batch = random.choices(self.memory,k=size)
-            dqn_agent.replay(batch)
+        networks = zip(self.networks, self.target_networks)
+        for net, target_net in networks:
+            batch = random.choices(self.memory, k=size)
+            net = replay_network(net, target_net, batch)
 
         return
 
@@ -201,35 +202,13 @@ class MultiHeadDQNAgent:
             agent.epsilon = epsilon
         return
 
-    @staticmethod
-    def resize_frame(ob):
-        """turns a single frame from original format to the format in Q function"""
-        # TODO: if changing network input, change here
-        ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
-        return np.array(resize(rgb2gray(ob), (WIDTH, HEIGHT))).flatten()
-
-    def reset_frame_buffer(self):
-        self._frames_buffer.clear()
-        for i in range(4):
-            self._frames_buffer.append(self._emptyframe)
-        return
-
-    def obs_to_state(self, ob):
-        """turns observation ob from env to state as used by agent"""
-        # TODO: if changing network input, change here
-        this_frame = self.resize_frame(ob)
-        self._frames_buffer.pop(0)  # oldest frame discarded
-        self._frames_buffer.append(this_frame)
-        return np.array(tuple(self._frames_buffer)).reshape([1, 4, WIDTH, HEIGHT])
-
     def train(self, episode_count=1000, episode_length=5000):
-
         ## Gain some experience..
         for i in range(episode_count):
             # Reset items
-            self.reset_frame_buffer()
+            reset_frame_buffer()
             ob = env.reset()
-            state = self.obs_to_state(ob)
+            state = obs_to_state(ob)
             prev_state = state
             action = 0
             reward = 0
@@ -240,35 +219,32 @@ class MultiHeadDQNAgent:
             lives = 0
 
             # Select a random agent for this episode
-            head_agent = self.agents[random.randrange(start=0, stop=self.agents_num)]
+            selected_network = self.networks[random.randrange(start=0, stop=self.agents_num)]
 
             ## for each episode we play according to head_agent for (at most) episode_length frames
             ## for each agent in self.agents, record each transition acording to it's probability
             for t in range(episode_length):
-                action = head_agent.get_action(state, reward, done)
+                action = get_action_from_network(selected_network, state, self.epsilon)
                 ob, reward, done, info = env.step(action)
                 prev_state = state
-                state = self.obs_to_state(ob)
+                state = obs_to_state(ob)
                 score += reward
                 reward = transform_reward(reward, done, info['ale.lives'] - lives, episode=i, action=action)
                 lives = info['ale.lives']
 
-                # TODO: UPDATE TO REMEMBER FOR EACH AGENT!
-                agent.remember(prev_state, action, reward, state, done)
+                self.remember(prev_state, action, reward, state, done)
                 total_reward += reward
 
                 env.render()
                 if done:
                     break
 
-                # env.monitor can record video of some episodes. see capped_cubic_video_schedule
-
                 # DEBUG ONLY
                 if (t % 250 == 0):
                     print("episode: {} step {}".format(i, t))
 
-                # Train after each episode (for when we didn't quite make it to 2000 frames...)
-                agent.replay()
+                # Train after each episode
+                self.replay()
 
             # Save every 25 runs
             if i % 25 == 0:
