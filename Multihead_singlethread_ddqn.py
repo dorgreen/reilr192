@@ -10,6 +10,7 @@ from keras.layers import Dense, Input, Flatten, Conv2D
 from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as kr
+import os
 
 
 
@@ -24,6 +25,7 @@ import keras.backend as kr
 
 WIDTH = 84
 HEIGHT = 84
+save_file_path = "./MultiHead_DQN_Agent_saves/"
 
 
 def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
@@ -81,6 +83,7 @@ def get_action_from_network(network, state, epsilon):
 
 
 def replay_network(network, target_network, batch, gamma=0.85):
+    print("train")
     target_network.set_weights(network.get_weights())
     # for each transition in this batch, set target and fit to model accordingly
 
@@ -147,7 +150,7 @@ class MultiHeadDQNAgent:
             networks.append(self.create_single_network())
         return networks
 
-    # TODO: FIX ME!
+
     def get_action(self, state, reward, done):
         """epsilon-greedy"""
         # Let all models vote
@@ -155,7 +158,8 @@ class MultiHeadDQNAgent:
         if random.random() > self.epsilon:
             actions = bytearray(6)
             for net in self.networks:
-                ++actions[get_action_from_network(net, state, epsilon=0.01)]
+                action = get_action_from_network(net, state, 0)
+                actions[action] += 1
             return np.argmax(actions)
 
         else:
@@ -189,17 +193,19 @@ class MultiHeadDQNAgent:
         return
 
     def load_weights_from_file(self, filename: str):
-        for i in range(self.agents_num):
-            self.agents[i].load_weights_from_file(filename + "{}.h5".format(i))
+        index = 0
+        for model in self.networks:
+            model.load_weights(filename + "{}.h5".format(index))
+            index += 1
+        return
 
     def save_weights_to_file(self, filename):
-        for i in range(self.agents_num):
-            self.agents[i].save_weights_to_file(filename + "{}.h5".format(i))
-
-    def set_agents_epsilon(self, epsilon):
-        for agent in self.agents:
-            agent.epsilon = epsilon
+        index = 0
+        for model in self.networks:
+            model.save_weights(filename + "{}.h5".format(index), True)
+            index += 1
         return
+
 
     def train(self, episode_count=1000, episode_length=5000):
         ## Gain some experience..
@@ -245,21 +251,35 @@ class MultiHeadDQNAgent:
             # Train after each episode
             self.replay()
 
-            # Save every 25 runs
+            # Save every 50 runs
+            if i % 50 == 0:
+                path = save_file_path+"{}/".format(i)
+                if not os.path.exists(path):
+                    os.mkdir(path)
+                self.save_weights_to_file(path)
+                self.save_weights_to_file(save_file_path + "{}/".format("latest"))
+
 
 
             # Close the env (and write monitor result info to disk if it was setup)
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
 
+        # Save after training!
+        print("Done training! now saving..")
+        self.save_weights_to_file(save_file_path + "{}/".format("final"))
+        self.save_weights_to_file(save_file_path + "{}/".format("latest"))
+        print("Done training and saving!")
+
 
 
 def play(agent, games=1, game_length=5000):
+    print("Playing {} games:".format(games))
     for game in range(games):
         # Reset
-        agent.reset_frame_buffer()
+        reset_frame_buffer()
         ob = env.reset()
-        state = agent.obs_to_state(ob)
+        state = obs_to_state(ob)
         action = 0
         reward = 0
         done = 0
@@ -270,13 +290,16 @@ def play(agent, games=1, game_length=5000):
         for t in range(game_length):
             action = agent.get_action(state, reward, done)
             ob, reward, done, info = env.step(action)
-            state = agent.obs_to_state(ob)
+            state = obs_to_state(ob)
             total_reward += reward
 
             env.render()
             if done:
                 print("game: {} total reward: {}".format(game, total_reward))
                 break
+
+    print("Done playing..")
+    return
 
 
 if __name__ == '__main__':
@@ -289,20 +312,14 @@ if __name__ == '__main__':
     logger.set_level(logger.INFO)
 
     env = gym.make('DemonAttack-v0')
-
-    ## Setup monitor if needed
-    ## possible to use tempfile.mkdtemp().
-    # outdir = '/tmp/random-agent-results'
-    # env = wrappers.Monitor(env, directory=outdir, force=True)
     env.seed(0)
-    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=2)
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=10)
     # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/save350.h5")
-    agent.train()
+    agent.train(episode_count=300)
 
-    agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/lastest.h5")
+    # agent.load_weights_from_file(save_file_path+"latest/")
     agent.epsilon = 0.01
-    agent.set_agents_epsilon(0)
-    play(agent, games=10)
+    play(agent, games=4)
     # else:
     #     train(agent)
     #     play(agent, games=1)
