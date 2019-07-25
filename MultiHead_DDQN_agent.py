@@ -10,8 +10,8 @@ from keras.layers import Dense, Input, Flatten, Conv2D
 from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as kr
-
-
+from typing import List
+import queue
 
 # - record actions taken (graph them?)
 # - TensorBoard:
@@ -30,13 +30,12 @@ HEIGHT = 84
 class DDQNAgent:
     def __init__(self, action_space, epsilion=0.95):
         self.action_space = action_space
-        self.state_size = WIDTH*HEIGHT*4
-        self.epsilon = epsilion # epsilon changes with "temperture", resets on each episode. takes about 900 runs
+        self.state_size = WIDTH * HEIGHT * 4
+        self.epsilon = epsilion  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.98
-        self.gamma = 0.85 # discount
+        self.gamma = 0.85  # discount
         self.learning_rate = 0.01
-        self.memory = list()
         self.model = self.create_model()
         self.target_model = self.create_model()
         self.update_target_model()
@@ -45,8 +44,7 @@ class DDQNAgent:
     def update_target_model(self):
         self.target_model.set_weights(self.model.get_weights())
 
-    def huber_loss(target, prediction):
-        @staticmethod
+    def huber_loss(self, target, prediction):
         error = prediction - target
         return kr.mean(kr.sqrt(1 + kr.square(error)) - 1, axis=-1)
 
@@ -56,20 +54,19 @@ class DDQNAgent:
 
         with tf.device("/cpu:0"):
             inputs = Input(shape=(4, WIDTH, HEIGHT,))
-            model = Conv2D(activation='relu', kernel_size=(8,8), filters=16,  strides=(4, 4),
-                                  padding='same')(inputs)
-            model = Conv2D(activation='relu', kernel_size=(4,4) ,filters=32, strides=(2, 2),
-                                  padding='same')(model)
+            model = Conv2D(activation='relu', kernel_size=(8, 8), filters=16, strides=(4, 4),
+                           padding='same')(inputs)
+            model = Conv2D(activation='relu', kernel_size=(4, 4), filters=32, strides=(2, 2),
+                           padding='same')(model)
             model = Flatten()(model)
             # Last two layers are fully-connected
             model = Dense(activation='relu', units=256)(model)
             q_values = Dense(activation='linear', units=6)(model)
             m = Model(input=inputs, outputs=q_values)
             m.compile(loss=self.huber_loss,
-                          optimizer=Adam(lr=self.learning_rate))
+                      optimizer=Adam(lr=self.learning_rate))
 
         return m
-
 
     def get_action(self, state, reward, done):
         """epsilon-greedy"""
@@ -80,23 +77,16 @@ class DDQNAgent:
         else:
             return random.randrange(start=0, stop=self.action_space.n)
 
-    # add this transition to memory
-    def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) >= 2000:
-            self.memory.pop()
-        self.memory.append((state, action,reward,next_state,done))
-        return
 
     # train model with the new data in memory
     #      TODO: add TensorBoard callback on model.predict for metrics report
-    def replay(self):
+    def replay(self, batch):
         # update epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon = (self.epsilon_decay * self.epsilon)
 
         self.update_target_model()
 
-        batch = self.memory
         # for each transition in this batch, set target and fit to model accordingly
 
         for state, action, reward, next_state, done in batch:
@@ -120,19 +110,14 @@ class DDQNAgent:
         self.model.save_weights(filename, True)
 
 
-
-
 def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
-
-    reward = -1 if reward == 0 else 10*reward
-    if episode==-1:
+    reward = -1 if reward == 0 else 10 * reward
+    if episode == -1:
         reward = -30 if lives_delta < 0 else reward
     else:
-        reward = max(-30, 0.5*episode) if lives_delta < 0 else reward
+        reward = max(-30, 0.5 * episode) if lives_delta < 0 else reward
     reward = reward if not done else -20
     return reward
-
-
 
 
 class MultiHeadDQNAgent:
@@ -144,32 +129,33 @@ class MultiHeadDQNAgent:
         self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.agents = self.create_model(num_of_agents, agents_epsilon)
         self._frames_buffer = list()
+        self.memory = list()
+
 
         # Create the empty frame
         temp_env = gym.make('DemonAttack-v0')
         self._emptyframe = self.resize_frame(temp_env.reset())
         temp_env.close()
 
-
         # creates the agents.
         # if using GPUs probably should be set here
-    def create_model(self, num_of_agents, agents_epsilon):
-        agents = list(num_of_agents)
+
+    def create_model(self, num_of_agents, agents_epsilon) -> List[DDQNAgent]:
+        agents = list()
         for i in range(num_of_agents):
-            agent.append(DDQNAgent(self.action_space, epsilion=agents_epsilon))
+            agents.append(DDQNAgent(self.action_space, epsilion=agents_epsilon))
 
-         return agents
-
+        return agents
 
     def get_action(self, state, reward, done):
         """epsilon-greedy"""
-        # Get the predictions from all models, sum them up
-        # Choose the best action according to that sum
-        # TODO: maybe choose the action with the highest value?
+        # Let all models vote
+        # Other options: action with best sum of values, the action with the highest value on some network
         if random.random() > self.epsilon:
+            actions = bytearray(6)
             for agent in self.agents:
-                action_vector =+ agent.model.predict(state)
-            return np.argmax(action_vector)
+                ++actions[agent.get_action(state,reward,done)]
+            return np.argmax(actions)
 
         else:
             return random.randrange(start=0, stop=self.action_space.n)
@@ -178,25 +164,37 @@ class MultiHeadDQNAgent:
         #      TODO: Add feature that saves image of state once in a while for debug
 
     def remember(self, state, action, reward, next_state, done):
-        #
+        if len(self.memory) >= 2500:
+            self.memory.pop()
+        self.memory.append((state, action,reward,next_state,done))
         return
 
         # train model with the new data in memory
         #      TODO: add TensorBoard callback on model.predict for metrics report
+
     # TODO: IMPLEMET WITH MULTITHREADS!
     def replay(self):
-        for agent in self.agents:
-            agent.replay()
+        # mask = np.random.binomial(self.agents_num, p=0.5, size=self.agents_num)
+        #
+        # for val, ddqn_agent in zip(mask, self.agents):
+        #     if val > 0:
+        #         self.memory[ddqn_agent].append([state, action, reward, next_state, done])
+
+        # Get a batch for each ddqn agent:
+        size = min(len(self.memory), 256)
+        for dqn_agent in self.agents:
+            batch = random.choices(self.memory,k=size)
+            dqn_agent.replay(batch)
 
         return
 
-
-    def load_weights_from_file(self, filename):
-        self.model.load_weights(filename)
-
+    def load_weights_from_file(self, filename: str):
+        for i in range(self.agents_num):
+            self.agents[i].load_weights_from_file(filename + "{}.h5".format(i))
 
     def save_weights_to_file(self, filename):
-        self.model.save_weights(filename, True)
+        for i in range(self.agents_num):
+            self.agents[i].save_weights_to_file(filename + "{}.h5".format(i))
 
     def set_agents_epsilon(self, epsilon):
         for agent in self.agents:
@@ -210,20 +208,19 @@ class MultiHeadDQNAgent:
         ## Original obervation is an nd array of (210, 160, 3) , such that H * W * rgb
         return np.array(resize(rgb2gray(ob), (WIDTH, HEIGHT))).flatten()
 
-
     def reset_frame_buffer(self):
         self._frames_buffer.clear()
         for i in range(4):
-            frames_buffer.append(_empty_frame)
+            self._frames_buffer.append(self._emptyframe)
         return
 
     def obs_to_state(self, ob):
         """turns observation ob from env to state as used by agent"""
         # TODO: if changing network input, change here
-        this_frame = self.esize_frame(ob)
+        this_frame = self.resize_frame(ob)
         self._frames_buffer.pop(0)  # oldest frame discarded
         self._frames_buffer.append(this_frame)
-        return np.array(tuple(frames_buffer)).reshape([1, 4, WIDTH, HEIGHT])
+        return np.array(tuple(self._frames_buffer)).reshape([1, 4, WIDTH, HEIGHT])
 
     def train(self, episode_count=1000, episode_length=5000):
 
@@ -270,23 +267,20 @@ class MultiHeadDQNAgent:
                 if (t % 250 == 0):
                     print("episode: {} step {}".format(i, t))
 
-
-            # Train after each episode (for when we didn't quite make it to 2000 frames...)
+                # Train after each episode (for when we didn't quite make it to 2000 frames...)
                 agent.replay()
 
             # Save every 25 runs
             if i % 25 == 0:
-                agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/save{}.h5".format(i))
-                agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/lastest.h5")
+                agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/save{}/".format(i))
+                agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/latest/")
 
             # Close the env (and write monitor result info to disk if it was setup)
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
 
-        agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/lastest.h5")
-        agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/final.h5")
-
-
+            agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/latest/")
+            agent.save_weights_to_file("./MultiHead_DQN_Agent_saves/final/")
 
 
 def play(agent, games=1, game_length=5000):
@@ -315,18 +309,15 @@ def play(agent, games=1, game_length=5000):
 
 
 if __name__ == '__main__':
-
     # TODO: set args to know if we should train or load from disk and just play according to model
     # TODO: set training via GPU?
     # TODO: add TensorBoard for logging and reporting. [could be used without TF scoping?]
-
 
     # You can set the level to logger.DEBUG or logger.WARN if you
     # want to change the amount of output.
     logger.set_level(logger.INFO)
 
     env = gym.make('DemonAttack-v0')
-
 
     ## Setup monitor if needed
     ## possible to use tempfile.mkdtemp().
