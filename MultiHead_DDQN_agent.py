@@ -10,7 +10,8 @@ from keras.layers import Dense, Input, Flatten, Conv2D
 from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as kr
-import multiprocessing
+from multiprocessing import Pool
+import itertools
 
 
 
@@ -82,6 +83,7 @@ def get_action_from_network(network, state, epsilon):
 
 
 def replay_network(network, target_network, batch, gamma=0.85):
+    print("replay")
     target_network.set_weights(network.get_weights())
     # for each transition in this batch, set target and fit to model accordingly
 
@@ -90,13 +92,21 @@ def replay_network(network, target_network, batch, gamma=0.85):
 
         if not done:
             target = (reward + gamma * np.amax(network.predict(next_state)))
-
+        # TODO: MAKE SURE PREDICT IS THREADSAFE
         target_f = target_network.predict(state)
         target_f[0][action] = target
         loss = network.fit(state, target_f, epochs=1, verbose=0)
 
-    return network
+    return
 
+
+def save_model(model, filename, index):
+    model.save_weights_to_file(filename + "{}.h5".format(index))
+
+def load_model(model, filename , index):
+    model.load_weights_from_file(filename + "{}.h5".format(index))
+
+pool = Pool(processes=4)
 
 class MultiHeadDQNAgent:
     # TODO: maybe add bootstrap map as a parameter
@@ -121,25 +131,25 @@ class MultiHeadDQNAgent:
         # creates the agents.
         # if using GPUs probably should be set here
 
+
+    def create_single_network(self):
+        inputs = Input(shape=(4, WIDTH, HEIGHT,))
+        model = Conv2D(activation='relu', kernel_size=(8, 8), filters=16, strides=(4, 4),
+                       padding='same')(inputs)
+        model = Conv2D(activation='relu', kernel_size=(4, 4), filters=32, strides=(2, 2),
+                       padding='same')(model)
+        model = Flatten()(model)
+        # Last two layers are fully-connected
+        model = Dense(activation='relu', units=256)(model)
+        q_values = Dense(activation='linear', units=6)(model)
+        m = Model(input=inputs, outputs=q_values)
+        m.compile(loss='mse',
+                  optimizer=Adam(lr=self.learning_rate))
+        return m
+
     def huber_loss(self, target, prediction):
         error = prediction - target
         return kr.mean(kr.sqrt(1 + kr.square(error)) - 1, axis=-1)
-
-    def create_single_network(self):
-        with tf.device("/cpu:0"):
-            inputs = Input(shape=(4, WIDTH, HEIGHT,))
-            model = Conv2D(activation='relu', kernel_size=(8, 8), filters=16, strides=(4, 4),
-                           padding='same')(inputs)
-            model = Conv2D(activation='relu', kernel_size=(4, 4), filters=32, strides=(2, 2),
-                           padding='same')(model)
-            model = Flatten()(model)
-            # Last two layers are fully-connected
-            model = Dense(activation='relu', units=256)(model)
-            q_values = Dense(activation='linear', units=6)(model)
-            m = Model(input=inputs, outputs=q_values)
-        m.compile(loss=self.huber_loss,
-                  optimizer=Adam(lr=self.learning_rate))
-        return m
 
     # Networks is a list of networks
     def create_model(self, num_of_agents):
@@ -154,10 +164,13 @@ class MultiHeadDQNAgent:
         # Let all models vote
         # Other options: action with best sum of values, the action with the highest value on some network
         if random.random() > self.epsilon:
-            actions = bytearray(6)
-            for net in self.networks:
-                ++actions[get_action_from_network(net, state, epsilon=0.01)]
-            return np.argmax(actions)
+            zip(self.networks, itertools.repeat(state))
+            actions = pool.map(get_action_from_network, zip(self.networks, itertools.repeat(state)))
+            actions_count = list()
+            for action in actions:
+                actions_count[action] += 1
+
+            return np.argmax(actions_count)
 
         else:
             return random.randrange(start=0, stop=self.action_space.n)
@@ -175,32 +188,34 @@ class MultiHeadDQNAgent:
         #      TODO: add TensorBoard callback on model.predict for metrics report
         # TODO: IMPLEMET WITH MULTITHREADS!
 
-    def replay(self):
 
+    def replay(self):
+        global pool
         if self.epsilon > self.epsilon_min:
             self.epsilon = (self.epsilon_decay * self.epsilon)
 
         # Get a batch for each ddqn agent:
         size = min(len(self.memory), 256)
-        networks = zip(self.networks, self.target_networks)
-        for net, target_net in networks:
-            batch = random.choices(self.memory, k=size)
-            net = replay_network(net, target_net, batch)
+
+        batchs = list()
+        for i in range(self.agents_num):
+            batchs.append(random.choices(self.memory, k=size))
+
+        networks_and_data = zip(self.networks, self.target_networks, batchs)
+        for item in pool.starmap(replay_network, networks_and_data):
+            pass
+
 
         return
 
-    def load_weights_from_file(self, filename: str):
-        for i in range(self.agents_num):
-            self.agents[i].load_weights_from_file(filename + "{}.h5".format(i))
+    def load_weights_from_file(self, path: str):
+        # pool.map(load_model, zip(self.networks, itertools.repeat(path), itertools.count(0)))
+        pass
 
-    def save_weights_to_file(self, filename):
-        for i in range(self.agents_num):
-            self.agents[i].save_weights_to_file(filename + "{}.h5".format(i))
+    def save_weights_to_file(self, path: str):
+        # pool.map(save_model, zip(self.networks, itertools.repeat(path), itertools.count(0)))
+        pass
 
-    def set_agents_epsilon(self, epsilon):
-        for agent in self.agents:
-            agent.epsilon = epsilon
-        return
 
     def train(self, episode_count=1000, episode_length=5000):
         ## Gain some experience..
@@ -243,8 +258,8 @@ class MultiHeadDQNAgent:
                 if (t % 250 == 0):
                     print("episode: {} step {}".format(i, t))
 
-                # Train after each episode
-                self.replay()
+            # Train after each episode
+            self.replay()
 
             # Save every 25 runs
             if i % 25 == 0:
@@ -300,7 +315,7 @@ if __name__ == '__main__':
     # outdir = '/tmp/random-agent-results'
     # env = wrappers.Monitor(env, directory=outdir, force=True)
     env.seed(0)
-    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=2)
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=4)
     # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/save350.h5")
     agent.train()
 
