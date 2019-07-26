@@ -25,7 +25,7 @@ import os
 
 WIDTH = 84
 HEIGHT = 84
-save_file_path = "./MultiHead_DQN_Agent_saves/"
+save_file_path = "MultiHead_DQN_Agent_saves/"
 
 
 def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
@@ -97,8 +97,6 @@ def replay_network(network, target_network, batch, gamma=0.85):
         target_f[0][action] = target
         loss = network.fit(state, target_f, epochs=1, verbose=0)
 
-    return network
-
 
 class MultiHeadDQNAgent:
     # TODO: maybe add bootstrap map as a parameter
@@ -128,17 +126,16 @@ class MultiHeadDQNAgent:
         return kr.mean(kr.sqrt(1 + kr.square(error)) - 1, axis=-1)
 
     def create_single_network(self):
-        with tf.device("/cpu:0"):
-            inputs = Input(shape=(4, WIDTH, HEIGHT,))
-            model = Conv2D(activation='relu', kernel_size=(4, 8), filters=32, strides=(4, 4),
-                           padding='same')(inputs)
-            model = Conv2D(activation='relu', kernel_size=(3,3), filters=64, strides=(1, 1),
-                           padding='same')(model)
-            model = Flatten()(model)
-            # Last two layers are fully-connected
-            model = Dense(activation='relu', units=512)(model)
-            q_values = Dense(activation='linear', units=6)(model)
-            m = Model(input=inputs, outputs=q_values)
+        inputs = Input(shape=(4, WIDTH, HEIGHT,))
+        model = Conv2D(activation='relu', kernel_size=(4, 8), filters=32, strides=(4, 4),
+                       padding='same')(inputs)
+        model = Conv2D(activation='relu', kernel_size=(3,3), filters=64, strides=(1, 1),
+                       padding='same')(model)
+        model = Flatten()(model)
+        # Last two layers are fully-connected
+        model = Dense(activation='relu', units=512)(model)
+        q_values = Dense(activation='linear', units=6)(model)
+        m = Model(input=inputs, outputs=q_values)
         m.compile(loss=self.huber_loss,
                   optimizer=Adam(lr=self.learning_rate))
         return m
@@ -156,11 +153,12 @@ class MultiHeadDQNAgent:
         # Let all models vote
         # Other options: action with best sum of values, the action with the highest value on some network
         if random.random() > self.epsilon:
-            actions = bytearray(6)
-            for net in self.networks:
-                action = get_action_from_network(net, state, 0)
-                actions[action] += 1
-            return np.argmax(actions)
+            with tf.device("/cpu:0"):
+                actions = bytearray(6)
+                for net in self.networks:
+                    action = get_action_from_network(net, state, 0)
+                    actions[action] += 1
+                return np.argmax(actions)
 
         else:
             return random.randrange(start=0, stop=self.action_space.n)
@@ -169,7 +167,7 @@ class MultiHeadDQNAgent:
         #      TODO: Add feature that saves image of state once in a while for debug
 
     def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) >= 10000:
+        if len(self.memory) >= 5000:
             self.memory.pop()
         self.memory.append((state, action, reward, next_state, done))
         return
@@ -179,16 +177,18 @@ class MultiHeadDQNAgent:
         # TODO: IMPLEMET WITH MULTITHREADS!
 
     def replay(self):
+        print("Replay")
 
         if self.epsilon > self.epsilon_min:
             self.epsilon = (self.epsilon_decay * self.epsilon)
 
         # Get a batch for each ddqn agent:
-        size = min(len(self.memory), 256)
+        size = (int) (len(self.memory) / (self.agents_num * 2))
         networks = zip(self.networks, self.target_networks)
-        for net, target_net in networks:
-            batch = random.choices(self.memory, k=size)
-            net = replay_network(net, target_net, batch,gamma=self.gamma)
+        with tf.device("gpu:0"):
+            for net, target_net in networks:
+                batch = random.choices(self.memory, k=size)
+                replay_network(net, target_net, batch, gamma=self.gamma)
 
         return
 
@@ -240,7 +240,7 @@ class MultiHeadDQNAgent:
                 self.remember(prev_state, action, reward, state, done)
                 total_reward += reward
 
-                env.render()
+                # env.render()
                 if done:
                     break
 
@@ -252,10 +252,10 @@ class MultiHeadDQNAgent:
             self.replay()
 
             # Save every 50 runs
-            if i % 50 == 0:
+            if i % 100 == 0:
                 path = save_file_path+"{}/".format(i)
                 if not os.path.exists(path):
-                    os.mkdir(path)
+                    os.makedirs(path, exist_ok=True)
                 self.save_weights_to_file(path)
                 self.save_weights_to_file(save_file_path + "{}/".format("latest"))
 
