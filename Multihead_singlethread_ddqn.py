@@ -106,7 +106,7 @@ class MultiHeadDQNAgent:
         self.state_size = WIDTH * HEIGHT * 4
         self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.991
+        self.epsilon_decay = 0.993
         self.gamma = 0.98  # discount
         self.learning_rate = 0.0025
         self.networks = self.create_model(num_of_agents)
@@ -167,7 +167,7 @@ class MultiHeadDQNAgent:
         #      TODO: Add feature that saves image of state once in a while for debug
 
     def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) >= 5000:
+        if len(self.memory) >= 7500:
             self.memory.pop()
         self.memory.append((state, action, reward, next_state, done))
         return
@@ -245,11 +245,12 @@ class MultiHeadDQNAgent:
                     break
 
                 # DEBUG ONLY
-                if (t % 250 == 0):
-                    print("episode: {} step {}".format(i, t))
+                # if (t % 250 == 0):
+                #     print("episode: {} step {}".format(i, t))
 
             # Train after each episode
-            self.replay()
+            if i % 2 == 0:
+                self.replay()
 
             # Save every 50 runs
             if i % 100 == 0:
@@ -265,6 +266,11 @@ class MultiHeadDQNAgent:
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
 
+            if i % 100 == 0:
+                training_epsilon = agent.epsilon
+                play(self, games=5)
+                agent.epsilon = training_epsilon
+
         # Save after training!
         print("Done training! now saving..")
         self.save_weights_to_file(save_file_path + "{}/".format("final"))
@@ -272,9 +278,10 @@ class MultiHeadDQNAgent:
         print("Done training and saving!")
 
 
-
+# TODO: ADD REPORTING TO TFBOARD
 def play(agent, games=1, game_length=5000):
     print("Playing {} games:".format(games))
+    agent.epsilon = agent.epsilon_min
     for game in range(games):
         # Reset
         reset_frame_buffer()
@@ -283,7 +290,6 @@ def play(agent, games=1, game_length=5000):
         action = 0
         reward = 0
         done = 0
-        agent.epsilon = agent.epsilon_min
         total_reward = 0
 
         # play one game
@@ -297,6 +303,8 @@ def play(agent, games=1, game_length=5000):
             if done:
                 print("game: {} total reward: {}".format(game, total_reward))
                 break
+        if not done:
+            print("game: {} total reward: {}".format(game, total_reward))
 
     print("Done playing..")
     return
@@ -313,8 +321,8 @@ if __name__ == '__main__':
 
     env = gym.make('DemonAttack-v0')
     env.seed(0)
-    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=5)
-    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/save350.h5")
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=7)
+    agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/200/")
     agent.train(episode_count=1500)
 
     # agent.load_weights_from_file(save_file_path+"latest/")
