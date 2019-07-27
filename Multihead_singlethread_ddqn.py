@@ -43,7 +43,7 @@ def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
 
 def resize_frame(ob):
     # TODO: if changing network input, change here
-    return np.array(resize(rgb2gray(ob), (WIDTH, HEIGHT))).flatten()
+    return np.array(resize(rgb2gray(ob)[22:-22], (WIDTH, HEIGHT))).flatten()
 
 
 temp_env = gym.make('DemonAttack-v0')
@@ -110,7 +110,7 @@ class MultiHeadDQNAgent:
         self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.993
-        self.gamma = 0.9  # discount
+        self.gamma = 0.85  # discount
         self.learning_rate = 0.0001
         self.networks = self.create_model(num_of_agents)
         self.target_networks = self.create_model(num_of_agents)
@@ -170,10 +170,13 @@ class MultiHeadDQNAgent:
         #      TODO: Add feature that saves image of state once in a while for debug
 
     def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) >= 1000000:
+        if len(self.memory) >= 18000:
             self.memory.pop()
+            full = True
+        else:
+            full = False
         self.memory.append((state, action, reward, next_state, done))
-        return
+        return full
 
         # train model with the new data in memory
         #      TODO: add TensorBoard callback on model.predict for metrics report
@@ -224,6 +227,7 @@ class MultiHeadDQNAgent:
             total_reward = 0
             score = 0
             lives = 0
+            full = False
 
             # Select a random agent for this episode
             selected_network = self.networks[random.randrange(start=0, stop=self.agents_num)]
@@ -239,7 +243,7 @@ class MultiHeadDQNAgent:
                 reward = transform_reward(reward, done, info['ale.lives'] - lives, episode=i, action=action)
                 lives = info['ale.lives']
 
-                self.remember(prev_state, action, reward, state, done)
+                full = self.remember(prev_state, action, reward, state, done)
                 total_reward += reward
 
                 # env.render()
@@ -255,19 +259,14 @@ class MultiHeadDQNAgent:
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
 
-            if i % 100 == 0 and i > 0:
-                training_epsilon = agent.epsilon
-                play(self, games=5)
-                agent.epsilon = training_epsilon
-
-            if self.memory.__len__() == 1000000:
+            if full:
                 self.replay()
                 self.memory.clear()
                 # Save after training!
                 print("Done training! now saving..")
                 self.save_weights_to_file(save_file_path + "{}/".format("latest"))
                 print("Done training and saving!")
-
+        return
 
 
 
@@ -317,10 +316,10 @@ if __name__ == '__main__':
     env = gym.make('DemonAttack-v0')
     env.seed(0)
     agent = MultiHeadDQNAgent(env.action_space, num_of_agents=7)
-    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/latest/")
+    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/bootstrap/")
     # epsilon as if we're in episode 200
-    agent.epsilon = 1
-    # agent.train(episode_count=1500)
+    agent.epsilon = 0.9
+    agent.train(episode_count=1500)
 
     agent.load_weights_from_file(save_file_path+"latest/")
     play(agent, games=5, render=True)
