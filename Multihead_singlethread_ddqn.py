@@ -93,6 +93,9 @@ def replay_network(network, target_network, batch, gamma=0.85):
         if not done:
             target = (reward + gamma * np.amax(network.predict(next_state)))
 
+        # or should it be target_f[0][action] - target ?
+        loss = target - reward
+
         target_f = target_network.predict(state)
         target_f[0][action] = target
         loss = network.fit(state, target_f, epochs=1, verbose=0)
@@ -107,8 +110,8 @@ class MultiHeadDQNAgent:
         self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.993
-        self.gamma = 0.98  # discount
-        self.learning_rate = 0.0025
+        self.gamma = 0.9  # discount
+        self.learning_rate = 0.001
         self.networks = self.create_model(num_of_agents)
         self.target_networks = self.create_model(num_of_agents)
 
@@ -128,12 +131,12 @@ class MultiHeadDQNAgent:
     def create_single_network(self):
         inputs = Input(shape=(4, WIDTH, HEIGHT,))
         model = Conv2D(activation='relu', kernel_size=(4, 8), filters=32, strides=(4, 4),
-                       padding='same')(inputs)
+                       padding='same', kernel_initializer='random_uniform')(inputs)
         model = Conv2D(activation='relu', kernel_size=(3,3), filters=64, strides=(1, 1),
-                       padding='same')(model)
+                       padding='same', kernel_initializer='random_uniform')(model)
         model = Flatten()(model)
         # Last two layers are fully-connected
-        model = Dense(activation='relu', units=512)(model)
+        model = Dense(activation='relu', units=512, kernel_initializer='random_uniform')(model)
         q_values = Dense(activation='linear', units=6)(model)
         m = Model(input=inputs, outputs=q_values)
         m.compile(loss=self.huber_loss,
@@ -167,14 +170,13 @@ class MultiHeadDQNAgent:
         #      TODO: Add feature that saves image of state once in a while for debug
 
     def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) >= 7500:
+        if len(self.memory) >= 15000:
             self.memory.pop()
         self.memory.append((state, action, reward, next_state, done))
         return
 
         # train model with the new data in memory
         #      TODO: add TensorBoard callback on model.predict for metrics report
-        # TODO: IMPLEMET WITH MULTITHREADS!
 
     def replay(self):
         print("Replay")
@@ -249,7 +251,7 @@ class MultiHeadDQNAgent:
                 #     print("episode: {} step {}".format(i, t))
 
             # Train after each episode
-            if i % 2 == 0:
+            if i % 5 == 0 and i > 0:
                 self.replay()
 
             # Save every 50 runs
@@ -266,7 +268,7 @@ class MultiHeadDQNAgent:
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
 
-            if i % 100 == 0:
+            if i % 100 == 0 and i > 0:
                 training_epsilon = agent.epsilon
                 play(self, games=5)
                 agent.epsilon = training_epsilon
@@ -281,7 +283,7 @@ class MultiHeadDQNAgent:
 # TODO: ADD REPORTING TO TFBOARD
 def play(agent, games=1, game_length=5000):
     print("Playing {} games:".format(games))
-    agent.epsilon = agent.epsilon_min
+    agent.epsilon = 0.05
     for game in range(games):
         # Reset
         reset_frame_buffer()
@@ -312,7 +314,6 @@ def play(agent, games=1, game_length=5000):
 
 if __name__ == '__main__':
     # TODO: set args to know if we should train or load from disk and just play according to model
-    # TODO: set training via GPU?
     # TODO: add TensorBoard for logging and reporting. [could be used without TF scoping?]
 
     # You can set the level to logger.DEBUG or logger.WARN if you
@@ -322,7 +323,9 @@ if __name__ == '__main__':
     env = gym.make('DemonAttack-v0')
     env.seed(0)
     agent = MultiHeadDQNAgent(env.action_space, num_of_agents=7)
-    agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/200/")
+    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/latest/")
+    # epsilon as if we're in episode 200
+    agent.epsilon = 1
     agent.train(episode_count=1500)
 
     # agent.load_weights_from_file(save_file_path+"latest/")
