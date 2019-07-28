@@ -30,19 +30,12 @@ save_file_path = "MultiHead_DQN_Agent_saves/"
 
 def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
     reward = -1 if reward == 0 else 10 * reward
-    if episode == -1:
-        reward = -10 if lives_delta < 0 else reward
-    else:
-        reward = max(-10, -0.5 * episode) if lives_delta < 0 else reward
-    reward = reward if not done else -20
+    reward = -10 if lives_delta < 0 else reward
     return reward
 
 
 """turns a single frame from original format to the format in Q function"""
-
-
 def resize_frame(ob):
-    # TODO: if changing network input, change here
     return np.array(resize(rgb2gray(ob)[22:-22], (WIDTH, HEIGHT))).flatten()
 
 
@@ -109,9 +102,9 @@ class MultiHeadDQNAgent:
         self.state_size = WIDTH * HEIGHT * 4
         self.epsilon = epsilon  # epsilon changes with "temperture", resets on each episode. takes about 900 runs
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.993
+        self.epsilon_decay = 0.972
         self.gamma = 0.85  # discount
-        self.learning_rate = 0.0001
+        self.learning_rate = 0.00001
         self.networks = self.create_model(num_of_agents)
         self.target_networks = self.create_model(num_of_agents)
 
@@ -188,7 +181,7 @@ class MultiHeadDQNAgent:
             self.epsilon = (self.epsilon_decay * self.epsilon)
 
         # Get a batch for each ddqn agent:
-        size = (int) (len(self.memory) / (self.agents_num * 2))
+        size = (int) (len(self.memory) / (self.agents_num * 3))
         networks = zip(self.networks, self.target_networks)
         with tf.device("gpu:0"):
             for net, target_net in networks:
@@ -206,6 +199,8 @@ class MultiHeadDQNAgent:
 
     def save_weights_to_file(self, filename):
         index = 0
+        if not os.path.exists(filename):
+            os.makedirs(filename, exist_ok=True)
         for model in self.networks:
             model.save_weights(filename + "{}.h5".format(index), True)
             index += 1
@@ -214,6 +209,7 @@ class MultiHeadDQNAgent:
 
     def train(self, episode_count=1000, episode_length=5000):
         ## Gain some experience..
+        replays = 0
         for i in range(episode_count):
             # Reset items
             reset_frame_buffer()
@@ -261,9 +257,12 @@ class MultiHeadDQNAgent:
 
             if full:
                 self.replay()
+                replays += 1
                 self.memory.clear()
                 # Save after training!
-                print("Done training! now saving..")
+                print("Done training {}!".format(replays))
+                if replays % 5 == 0:
+                    self.save_weights_to_file(save_file_path + "{}/".format(replays))
                 self.save_weights_to_file(save_file_path + "{}/".format("latest"))
                 print("Done training and saving!")
         return
@@ -315,14 +314,15 @@ if __name__ == '__main__':
 
     env = gym.make('DemonAttack-v0')
     env.seed(0)
-    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=7)
-    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/bootstrap/")
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=6)
+    agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/bootstrap/")
+    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/1200_long_mem/")
     # epsilon as if we're in episode 200
-    agent.epsilon = 0.9
-    agent.train(episode_count=1500)
+    agent.epsilon = 0.95
+    # agent.train(episode_count=1500)
 
-    agent.load_weights_from_file(save_file_path+"latest/")
-    play(agent, games=5, render=True)
+    # agent.load_weights_from_file(save_file_path+"latest/")
+    play(agent, games=10, render=True)
     # else:
     #     train(agent)
     #     play(agent, games=1)
