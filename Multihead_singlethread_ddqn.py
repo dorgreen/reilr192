@@ -11,7 +11,8 @@ from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as kr
 import os
-
+import datetime
+import keras.callbacks
 
 
 # - record actions taken (graph them?)
@@ -26,6 +27,23 @@ import os
 WIDTH = 84
 HEIGHT = 84
 save_file_path = "MultiHead_DQN_Agent_saves/"
+
+logdir="./multigead_singlethread_ddqn_logs" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+tensorboard= keras.callbacks.TensorBoard(log_dir=logdir)
+train_writer = tf.summary.FileWriter(logdir + '/train')
+test_writer = tf.summary.FileWriter(logdir + '/test')
+
+def variable_summaries(var):
+    """Attach a lot of summaries to a Tensor (for TensorBoard visualization)."""
+    with tf.name_scope('summaries'):
+        mean = tf.reduce_mean(var)
+        tf.summary.scalar('mean', mean)
+    with tf.name_scope('stddev'):
+      stddev = tf.sqrt(tf.reduce_mean(tf.square(var - mean)))
+      tf.summary.scalar('stddev', stddev)
+      tf.summary.scalar('max', tf.reduce_max(var))
+      tf.summary.scalar('min', tf.reduce_min(var))
+      tf.summary.histogram('histogram', var)
 
 
 def transform_reward(reward, done, lives_delta, episode=-1, action=-1):
@@ -87,22 +105,23 @@ def replay_network(network, target_network, batch, gamma=0.85):
     target_network.set_weights(network.get_weights())
     # for each transition in this batch, set target and fit to model accordingly
 
+    batch_losses = list()
     for state, action, reward, next_state, done in batch:
         target = reward
 
         if not done:
             target = (reward + gamma * np.amax(network.predict(next_state)))
 
-        # or should it be target_f[0][action] - target ?
-        loss = target - reward
-
         target_f = target_network.predict(state)
+        batch_losses.append(target_f[0][action] - target)
         target_f[0][action] = target
-        loss = network.fit(state, target_f, epochs=1, verbose=0)
+        network.fit(state, target_f, epochs=1, verbose=0, callbacks=[tensorboard])
+
+    # with tf.name_scope('Replay'):
+    #     variable_summaries(batch_losses)
 
 
 class MultiHeadDQNAgent:
-    # TODO: maybe add bootstrap map as a parameter
     def __init__(self, action_space, num_of_agents, epsilon=0.95, agents_epsilon=0.95):
         self.action_space = action_space
         self.agents_num = num_of_agents
@@ -131,9 +150,9 @@ class MultiHeadDQNAgent:
     def create_single_network(self):
         inputs = Input(shape=(4, WIDTH, HEIGHT,))
         model = Conv2D(activation='relu', kernel_size=(4, 8), filters=32, strides=(4, 4),
-                       padding='same', kernel_initializer='random_uniform')(inputs)
+                       padding='same', kernel_initializer='random_uniform', bias_initializer=tf.variance_scaling_initializer(2))(inputs)
         model = Conv2D(activation='relu', kernel_size=(3,3), filters=64, strides=(1, 1),
-                       padding='same', kernel_initializer='random_uniform')(model)
+                       padding='same', kernel_initializer='random_uniform', bias_initializer=tf.variance_scaling_initializer(2))(model)
         model = Flatten()(model)
         # Last two layers are fully-connected
         model = Dense(activation='relu', units=512, kernel_initializer='random_uniform')(model)
@@ -172,8 +191,11 @@ class MultiHeadDQNAgent:
     def remember(self, state, action, reward, next_state, done):
         if len(self.memory) >= 15000:
             self.memory.pop()
-        self.memory.append((state, action, reward, next_state, done))
-        return
+            full = True
+        else:
+            full = False
+        self.memory.append((state, action,reward,next_state,done))
+        return full
 
         # train model with the new data in memory
         #      TODO: add TensorBoard callback on model.predict for metrics report
@@ -224,6 +246,7 @@ class MultiHeadDQNAgent:
             total_reward = 0
             score = 0
             lives = 0
+            full = 0
 
             # Select a random agent for this episode
             selected_network = self.networks[random.randrange(start=0, stop=self.agents_num)]
@@ -239,7 +262,7 @@ class MultiHeadDQNAgent:
                 reward = transform_reward(reward, done, info['ale.lives'] - lives, episode=i, action=action)
                 lives = info['ale.lives']
 
-                self.remember(prev_state, action, reward, state, done)
+                full = self.remember(prev_state, action, reward, state, done)
                 total_reward += reward
 
                 # env.render()
@@ -250,23 +273,17 @@ class MultiHeadDQNAgent:
                 # if (t % 250 == 0):
                 #     print("episode: {} step {}".format(i, t))
 
-            # Train after each episode
-            if i % 5 == 0 and i > 0:
-                self.replay()
-
-            # Save every 50 runs
-            if i % 100 == 0:
-                path = save_file_path+"{}/".format(i)
-                if not os.path.exists(path):
-                    os.makedirs(path, exist_ok=True)
-                self.save_weights_to_file(path)
-                self.save_weights_to_file(save_file_path + "{}/".format("latest"))
-
-
-
             # Close the env (and write monitor result info to disk if it was setup)
             print("EPISODE: {} SCORE: {} TOTAL REWARD {} epsilon {}".format(i, score, total_reward, agent.epsilon))
             env.close()
+
+            if full:
+                agent.replay(agent.batch_size)
+                agent.memory.clear()
+
+            if i % 100 == 0:
+                agent.update_target_model()
+                agent.save_weights_to_file("./DDQN_Agent_saves/{}.h5".format(i))
 
             if i % 100 == 0 and i > 0:
                 training_epsilon = agent.epsilon
@@ -293,31 +310,57 @@ def play(agent, games=1, game_length=5000):
         reward = 0
         done = 0
         total_reward = 0
+        lives = 0
+        actions = dict()
+        for i in range(6):
+            actions[i] = 0
+        rewards = list()
+        score = 0
 
         # play one game
         for t in range(game_length):
             action = agent.get_action(state, reward, done)
+            actions[action] = actions[action] + 1
             ob, reward, done, info = env.step(action)
             state = obs_to_state(ob)
+            score += reward
+            reward = transform_reward(reward, done, info['ale.lives'] - lives, action=action)
+            lives = info['ale.lives']
             total_reward += reward
+            rewards.append(rewards)
 
             env.render()
             if done:
                 print("game: {} total reward: {}".format(game, total_reward))
                 break
+
         if not done:
             print("game: {} total reward: {}".format(game, total_reward))
+
+        # with tf.name_scope('Play_summary'):
+        #     played_actions = actions
+        #     total_score = score
+        #     collected_rewards = rewards
+
+        tf.summary.histogram("play_rewards",rewards)
+        tf.summary.scalar("play_score", score)
+        tf.summary.histogram("played_actions", actions)
+        test_writer.add_event()
+
+
+            # test_writer.add_summary(tf.summary.histogram("Collected_rewards", collected_rewards))
+        # test_writer.add_summary(tf.summary.histogram("Actions_choosen", played_actions))
+        # test_writer.add_summary(tf.summary.scalar("total_reward", total_reward))
+        # test_writer.add_summary(tf.summary.scalar("total_score", score))
 
     print("Done playing..")
     return
 
 
-if __name__ == '__main__':
-    # TODO: set args to know if we should train or load from disk and just play according to model
-    # TODO: add TensorBoard for logging and reporting. [could be used without TF scoping?]
+tensorboard_callback = keras.callbacks.TensorBoard(log_dir=logdir)
 
-    # You can set the level to logger.DEBUG or logger.WARN if you
-    # want to change the amount of output.
+
+if __name__ == '__main__':
     logger.set_level(logger.INFO)
 
     env = gym.make('DemonAttack-v0')
@@ -326,8 +369,7 @@ if __name__ == '__main__':
     # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/latest/")
     # epsilon as if we're in episode 200
     agent.epsilon = 1
-    agent.train(episode_count=1500)
-
+    # agent.train(episode_count=1500)
     # agent.load_weights_from_file(save_file_path+"latest/")
     agent.epsilon = 0.01
     play(agent, games=4)
