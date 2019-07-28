@@ -13,6 +13,7 @@ import keras.backend as kr
 import os
 import datetime
 import keras.callbacks
+from tensorboard.plugins.custom_scalar import layout_pb2
 
 
 # - record actions taken (graph them?)
@@ -28,10 +29,12 @@ WIDTH = 84
 HEIGHT = 84
 save_file_path = "MultiHead_DQN_Agent_saves/"
 
-logdir="./multigead_singlethread_ddqn_logs" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+logdir="./multihead_singlethread_ddqn_logs/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 tensorboard= keras.callbacks.TensorBoard(log_dir=logdir)
-train_writer = tf.summary.FileWriter(logdir + '/train')
-test_writer = tf.summary.FileWriter(logdir + '/test')
+writer = tf.summary.FileWriter(logdir)
+summary_writer = tf.contrib.summary.create_file_writer(
+    logdir, flush_millis=10000)
+
 
 def variable_summaries(var):
     """Attach a lot of summaries to a Tensor (for TensorBoard visualization)."""
@@ -108,7 +111,10 @@ def replay_network(network, target_network, batch, gamma=0.85):
         target_f = target_network.predict(state)
         batch_losses.append(target_f[0][action] - target)
         target_f[0][action] = target
-        loss = network.fit(state, target_f, epochs=1, verbose=0)
+        network.fit(state, target_f, epochs=1, verbose=0, callbacks=[tensorboard])
+
+    # with tf.name_scope('Replay'):
+    #     variable_summaries(batch_losses)
 
 
 class MultiHeadDQNAgent:
@@ -175,9 +181,6 @@ class MultiHeadDQNAgent:
         else:
             return random.randrange(start=0, stop=self.action_space.n)
 
-        # add this transition to memory
-        #      TODO: Add feature that saves image of state once in a while for debug
-
     def remember(self, state, action, reward, next_state, done):
         if len(self.memory) >= 18000:
             self.memory.pop()
@@ -188,7 +191,6 @@ class MultiHeadDQNAgent:
         return full
 
         # train model with the new data in memory
-        #      TODO: add TensorBoard callback on model.predict for metrics report
 
     def replay(self):
         print("Replay")
@@ -285,7 +287,6 @@ class MultiHeadDQNAgent:
 
 
 
-# TODO: ADD REPORTING TO TFBOARD
 def play(agent, games=1, game_length=5000, render=False):
     print("Playing {} games:".format(games))
     original_epsilon = agent.epsilon
@@ -321,23 +322,35 @@ def play(agent, games=1, game_length=5000, render=False):
             if render:
                 env.render()
             if done:
-                print("game: {} total reward: {}".format(game, total_reward))
+                print("game: {} total_score: {} total reward: {}".format(game,score , total_reward))
                 break
 
         if not done:
-            print("game: {} total reward: {}".format(game, total_reward))
+            print("game: {} total_score: {} total reward: {}".format(game, score, total_reward))
+
+
+        # model code goes here
+        # and in it call
+        # tf.contrib.summary.scalar("loss", my_loss)
+        played_actions = actions
+        total_score = tf.constant([score])
+        collected_rewards = rewards
+        tf.summary.scalar("play_score", total_score)
+
+        # writer.add_summary(
 
         # with tf.name_scope('Play_summary'):
         #     played_actions = actions
         #     total_score = score
         #     collected_rewards = rewards
+        #     tf.summary.scalar("play_score", total_score)
+        #     tf.summary.merge_all()
 
-        tf.summary.histogram("play_rewards",rewards)
-        tf.summary.scalar("play_score", score)
-        tf.summary.histogram("played_actions", actions)
-        test_writer.add_event()
-
-
+        # test_writer.add_event(tf.summary.histogram("play_rewards",rewards))
+        # tf.summary.scalar("play_score", total_score)
+        # tf.summary.scalar("play_rewards", total_reward)
+        # tf.summary.merge_all()
+# tf.summary.histogram("played_actions", actions)
             # test_writer.add_summary(tf.summary.histogram("Collected_rewards", collected_rewards))
         # test_writer.add_summary(tf.summary.histogram("Actions_choosen", played_actions))
         # test_writer.add_summary(tf.summary.scalar("total_reward", total_reward))
@@ -349,24 +362,14 @@ def play(agent, games=1, game_length=5000, render=False):
 
 
 if __name__ == '__main__':
-    # TODO: set args to know if we should train or load from disk and just play according to model
-    # TODO: add TensorBoard for logging and reporting. [could be used without TF scoping?]
-
-    # You can set the level to logger.DEBUG or logger.WARN if you
-    # want to change the amount of output.
     logger.set_level(logger.INFO)
 
     env = gym.make('DemonAttack-v0')
     env.seed(0)
-    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=6)
+    agent = MultiHeadDQNAgent(env.action_space, num_of_agents=2)
     agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/bootstrap/")
-    # agent.load_weights_from_file("./MultiHead_DQN_Agent_saves/1200_long_mem/")
-    # epsilon as if we're in episode 200
-    agent.epsilon = 0.95
-    # agent.train(episode_count=1500)
+    agent.train(episode_count=1500)
 
     # agent.load_weights_from_file(save_file_path+"latest/")
     play(agent, games=10, render=True)
-    # else:
-    #     train(agent)
-    #     play(agent, games=1)
+

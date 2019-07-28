@@ -251,11 +251,16 @@ def play(agent, games=1, game_length=5000, render=False):
         agent.epsilon = agent.epsilon_min
         total_reward = 0
         lives = 0
+        actions = dict()
+        for i in range(6):
+            actions[i] = 0
+        rewards = list()
         score = 0
 
         # play one game
         for t in range(game_length):
             action = agent.get_action(state, reward, done)
+            actions[action] = actions[action] + 1
             ob, reward, done, info = env.step(action)
             state = obs_to_state(ob)
             score += reward
@@ -269,6 +274,17 @@ def play(agent, games=1, game_length=5000, render=False):
                 print("game: {} score {} total reward: {}".format(game,score, total_reward))
                 break
 
+        if not done:
+            print("game: {} score {} total reward: {}".format(game, score, total_reward))
+
+        tf.summary.histogram("play_rewards{}".format(game), rewards)
+        tf.summary.scalar("play_score{}".format(game), score)
+        tf.summary.histogram("played_actions{}".format(game), actions)
+    tf.summary.merge_all()
+
+
+
+
 
 if __name__ == '__main__':
 
@@ -281,7 +297,7 @@ if __name__ == '__main__':
 
     env.seed(0)
     agent = DQNAgent(env.action_space)
-    # agent.load_weights_from_file("./DDQN_Agent_saves/latest.h5")
+    agent.load_weights_from_file("./DDQN_Agent_saves/latest.h5")
     # agent.epsilon = 0.3
     train(agent, episode_count=1000)
 
